@@ -66,7 +66,9 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
       }
 
       try {
-        const topic = mqtt.topics?.outbound ?? "openclaw/outbound";
+        // For outbound messages initiated by the system (not in response to an inbound message),
+        // use the default outbound topic
+        const topic = "openclaw/outbound";
         await mqttClient.publish(topic, text, mqtt.qos);
         return { ok: true };
       } catch (err) {
@@ -106,17 +108,16 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
 
       // Subscribe to inbound topic
       const inboundTopic = mqtt.topics?.inbound ?? "openclaw/inbound";
-      const outboundTopic = mqtt.topics?.outbound ?? "openclaw/outbound";
       
-      mqttClient.subscribe(inboundTopic, async (topic: string, payload: Buffer) => {
+      mqttClient.subscribe(inboundTopic, async (topic: string, payload: Buffer, packet: any) => {
         await handleInboundMessage({
           topic,
           payload,
+          packet,
           runtime,
           cfg,
           accountId,
           log,
-          outboundTopic,
           qos: mqtt.qos,
         });
       });
@@ -153,18 +154,39 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
 async function handleInboundMessage(opts: {
   topic: string;
   payload: Buffer;
+  packet: any;
   runtime: any;
   cfg: any;
   accountId: string;
   log: any;
-  outboundTopic: string;
   qos: number;
 }) {
-  const { topic, payload, runtime, cfg, accountId, log, outboundTopic, qos } = opts;
+  const { topic, payload, packet, runtime, cfg, accountId, log, qos } = opts;
 
   try {
     const text = payload.toString("utf-8");
     log?.info?.(`Inbound MQTT message on ${topic}: ${text.slice(0, 200)}${text.length > 200 ? "..." : ""}`);
+
+    // Log user properties if present
+    if (packet && packet.properties && packet.properties.userProperties) {
+      const userProps = packet.properties.userProperties;
+      log?.info?.(`MQTT message user properties: ${JSON.stringify(userProps)}`);
+    } else {
+      log?.info?.('MQTT message has no user properties');
+    }
+
+    // Get the reply topic from userProperties or fallback to default
+    let replyTopic = "openclaw/outbound"; // Default fallback
+    if (packet && packet.properties && packet.properties.userProperties) {
+      const userProps = packet.properties.userProperties;
+      if (userProps.reply_to) {
+        replyTopic = userProps.reply_to;
+      } else {
+        log?.warn?.('MQTT v5.0 message missing required "reply_to" property in userProperties, using default reply topic');
+      }
+    } else {
+      log?.warn?.('MQTT message missing properties or userProperties, using default reply topic');
+    }
 
     // Parse JSON if possible to extract structured data
     let parsedPayload: Record<string, unknown> | null = null;
@@ -240,7 +262,7 @@ async function handleInboundMessage(opts: {
 
           log?.info?.(`MQTT reply (${info.kind}) [${payload.text.length} chars]`);
 
-          if (mqttClient?.isConnected()) {
+           if (mqttClient?.isConnected()) {
             try {
               const outboundPayload = JSON.stringify({
                 senderId: "openclaw",
@@ -249,8 +271,8 @@ async function handleInboundMessage(opts: {
                 ts: Date.now(),
                 ...(correlationId ? { correlationId } : {}),
               });
-              await mqttClient.publish(outboundTopic, outboundPayload, qos as 0 | 1 | 2);
-              log?.info?.(`MQTT: sent reply to ${outboundTopic}`);
+              await mqttClient.publish(replyTopic, outboundPayload, qos as 0 | 1 | 2);
+              log?.info?.(`MQTT: sent reply to ${replyTopic}`);
             } catch (err) {
               log?.error?.(`MQTT: failed to send reply: ${err}`);
             }

@@ -38,10 +38,15 @@ Add to `~/.openclaw/openclaw.json`:
       // Optional auth
       username: "openclaw",
       password: "secret",
+      // MQTT v5.0 specific options
+      protocolVersion: 5,              // Only supports MQTT 5.0
+      userProperties: {                // Custom properties sent with connection
+        "application": "openclaw-mqtt",
+        "version": "1.0.0"
+      },
       // Topics
       topics: {
         inbound: "openclaw/inbound",   // Subscribe to this
-        outbound: "openclaw/outbound"  // Publish responses here
       },
       // Quality of Service (0=fire-and-forget, 1=at-least-once, 2=exactly-once)
       qos: 1
@@ -61,30 +66,37 @@ openclaw gateway restart
 ### Sessions & correlation IDs (important)
 
 - **Sessions are keyed by `senderId`** → OpenClaw uses `mqtt:{senderId}` as the SessionKey, so memory and conversation history are grouped by sender.
-- **`correlationId` is request‑level only** → if you include it in inbound JSON, it’s echoed back in the outbound reply for client-side matching. It does **not** create a new session or change memory.
+- **`correlationId` is request‑level only** → if you include it in inbound JSON, it's echoed back in the outbound reply for client-side matching. It does **not** create a new session or change memory.
 
 If you want separate conversations, use distinct `senderId`s.
 
 ### Receiving messages (inbound)
 
 Messages published to your `inbound` topic will be processed by OpenClaw.
+With MQTT v5.0, you must include a `reply_to` property in the userProperties to specify the reply topic.
 You can send either plain text or JSON (recommended):
 
 ```bash
-# Plain text
-mosquitto_pub -t "openclaw/inbound" -m "Alert: Service down on playground"
+# Plain text with user properties (using mosquitto_pub with MQTT v5.0)
+mosquitto_pub --property "user-property" "reply_to=openclaw/reply/pg-cli" -t "openclaw/inbound" -m "Alert: Service down on playground"
 
-# JSON (recommended)
-mosquitto_pub -t "openclaw/inbound" -m '{"senderId":"pg-cli","text":"hello","correlationId":"abc-123"}'
+# JSON (recommended) with user properties
+mosquitto_pub --property "user-property" "reply_to=openclaw/reply/pg-cli" -t "openclaw/inbound" -m '{"senderId":"pg-cli","text":"hello","correlationId":"abc-123"}'
 ```
 
-### Sending messages (outbound)
+### Message Reply Mechanism
 
-Agent replies are published to the `outbound` topic as JSON:
+The MQTT plugin uses a dynamic reply mechanism based on MQTT v5.0 userProperties:
+
+- **Reply Topic Selection**: The topic for sending replies is determined by the `reply_to` userProperty in the incoming message. 
+- **Fallback Behavior**: If no `reply_to` property is provided, replies will go to the default `openclaw/outbound` topic.
+- **Message Format**: All agent replies are published as JSON with the following structure:
 
 ```json
 {"senderId":"openclaw","text":"...","kind":"final","ts":1700000000000}
 ```
+
+This dynamic reply mechanism allows publishers to control where responses are delivered, enabling flexible communication patterns between multiple services.
 
 If you want to publish custom text via CLI, use the `message` tool:
 
@@ -123,8 +135,11 @@ MQTT Broker (Mosquitto/EMQX)
      │
      ├─► inbound topic ──► OpenClaw Gateway ──► Agent
      │
-     └─◄ outbound topic ◄── OpenClaw Gateway ◄── Agent
+     └─◄ dynamic reply topic (via reply_to user property) ◄── OpenClaw Gateway ◄── Agent
 ```
+
+The reply topic is determined dynamically based on the `reply_to` user property in the incoming message.
+If no `reply_to` property is provided, replies default to `openclaw/outbound`.
 
 ## License
 

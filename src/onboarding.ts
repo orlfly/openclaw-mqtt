@@ -14,7 +14,6 @@ interface MqttConfig {
       password?: string;
       topics?: {
         inbound?: string;
-        outbound?: string;
       };
       tls?: {
         enabled?: boolean;
@@ -164,10 +163,12 @@ export const mqttOnboardingAdapter = {
     // Topics
     await prompter.note(
       [
-        "Topics define where OpenClaw listens and publishes:",
+        "Topics define where OpenClaw listens:",
         "",
         "  • Inbound: messages TO OpenClaw (e.g., alerts, commands)",
-        "  • Outbound: messages FROM OpenClaw (e.g., responses)",
+        "",
+        "Note: Replies will be sent to the topic specified in the incoming message's",
+        "send_back user property. If not provided, defaults to openclaw/outbound.",
         "",
         "Wildcards supported: + (single level), # (multi level)",
         "Example: home/+/alerts, sensors/#",
@@ -180,15 +181,6 @@ export const mqttOnboardingAdapter = {
         message: "Inbound topic (messages to OpenClaw)",
         placeholder: "openclaw/inbound",
         initialValue: cfg.channels?.mqtt?.topics?.inbound || "openclaw/inbound",
-      })
-    ).trim();
-
-    const outboundTopic = String(
-      await prompter.text({
-        message: "Outbound topic (messages from OpenClaw)",
-        placeholder: "openclaw/outbound",
-        initialValue:
-          cfg.channels?.mqtt?.topics?.outbound || "openclaw/outbound",
       })
     ).trim();
 
@@ -216,7 +208,6 @@ export const mqttOnboardingAdapter = {
           ...(tls && { tls }),
           topics: {
             inbound: inboundTopic,
-            outbound: outboundTopic,
           },
           qos,
         },

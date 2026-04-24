@@ -10,7 +10,7 @@ export interface MqttClientManager {
   isConnected(): boolean;
 }
 
-export type MessageHandler = (topic: string, payload: Buffer) => void;
+export type MessageHandler = (topic: string, payload: Buffer, packet?: any) => void;
 
 interface Logger {
   debug(msg: string): void;
@@ -47,6 +47,7 @@ export function createMqttClient(
       clean: true,
       connectTimeout: 10000,
       reconnectPeriod: 0,
+      protocolVersion: config.protocolVersion,
     };
 
     // Auth
@@ -55,6 +56,14 @@ export function createMqttClient(
     }
     if (config.password) {
       options.password = config.password;
+    }
+
+    // User Properties (MQTT v5.0)
+    if (config.userProperties && Object.keys(config.userProperties).length > 0) {
+      options.properties = {
+        ...options.properties,
+        userProperties: config.userProperties,
+      };
     }
 
     // TLS
@@ -114,14 +123,31 @@ export function createMqttClient(
   }
 
   function attachClientHandlers(activeClient: MqttClient) {
-    activeClient.on("connect", () => {
+    activeClient.on("connect", (connack: any) => {
       logger.info("MQTT connected");
+      
+      // Check broker protocol version
+      if (config.protocolVersion === 5) {
+        if (connack && typeof connack === 'object') {
+          logger.info(`MQTT 5.0 broker connected (Reason code: ${connack.reasonCode || 'unknown'})`);
+          
+          // If the connack has properties specific to MQTT 5.0, confirm the version
+          if (connack.properties) {
+            logger.debug("MQTT 5.0 properties received from broker");
+          }
+        } else {
+          logger.info("MQTT 5.0 connection established");
+        }
+      } else {
+        logger.warn(`Expected MQTT 5.0 but protocol version is ${config.protocolVersion}`);
+      }
+      
       reconnectAttempts = 0;
       clearReconnectTimer();
 
       // Resubscribe to all topics
       for (const topic of messageHandlers.keys()) {
-        activeClient.subscribe(topic, { qos: config.qos }, (err) => {
+        activeClient.subscribe(topic, { qos: config.qos }, (err: Error | null) => {
           if (err) {
             logger.error(`Failed to subscribe to ${topic}: ${err.message}`);
           } else {
@@ -131,45 +157,46 @@ export function createMqttClient(
       }
     });
 
-    activeClient.on("message", (topic, payload) => {
-      logger.debug(`Received message on ${topic}: ${payload.length} bytes`);
-      const handlers = [...(messageHandlers.get(topic) ?? [])];
+      activeClient.on("message", (topic: string, payload: Buffer, packet: any) => {
+        logger.debug(`Received message on ${topic}: ${payload.length} bytes`);
+        const handlers = [...(messageHandlers.get(topic) ?? [])];
 
-      // Also check wildcard subscriptions (skip exact match to avoid duplicates)
-      for (const [pattern, patternHandlers] of messageHandlers) {
-        if (pattern === topic) continue;
-        if (topicMatches(pattern, topic)) {
-          handlers.push(...patternHandlers);
+        // Also check wildcard subscriptions (skip exact match to avoid duplicates)
+        for (const [pattern, patternHandlers] of messageHandlers) {
+          if (pattern === topic) continue;
+          if (topicMatches(pattern, topic)) {
+            handlers.push(...patternHandlers);
+          }
         }
-      }
 
-      for (const handler of handlers) {
-        try {
-          handler(topic, payload);
-        } catch (err) {
-          logger.error(`Message handler error: ${err}`);
+        for (const handler of handlers) {
+          try {
+            // Pass the packet properties (including userProperties) to the handler
+            handler(topic, payload, packet);
+          } catch (err) {
+            logger.error(`Message handler error: ${err}`);
+          }
         }
-      }
-    });
+      });
 
-    activeClient.on("error", (err) => {
-      logger.error(`MQTT error: ${err.message}`);
-      scheduleReconnect("error");
-    });
+      activeClient.on("error", (err: Error) => {
+        logger.error(`MQTT error: ${err.message}`);
+        scheduleReconnect("error");
+      });
 
-    activeClient.on("close", () => {
-      logger.warn("MQTT connection closed");
-      scheduleReconnect("close");
-    });
+      activeClient.on("close", () => {
+        logger.warn("MQTT connection closed");
+        scheduleReconnect("close");
+      });
 
-    activeClient.on("reconnect", () => {
-      logger.info("MQTT reconnect event");
-    });
+      activeClient.on("reconnect", () => {
+        logger.info("MQTT reconnect event");
+      });
 
-    activeClient.on("offline", () => {
-      logger.warn("MQTT client offline");
-      scheduleReconnect("offline");
-    });
+      activeClient.on("offline", () => {
+        logger.warn("MQTT client offline");
+        scheduleReconnect("offline");
+      });
   }
 
   async function connect(): Promise<void> {

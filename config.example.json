@@ -5,6 +5,11 @@
       "username": "your-username",
       "password": "YOUR_PASSWORD_HERE",
       "clientId": "openclaw-agent",
+      "protocolVersion": 5,
+      "userProperties": {
+        "application": "openclaw-mqtt",
+        "version": "1.0.0"
+      },
       "topics": {
         "inbound": "openclaw/inbound",
         "outbound": "openclaw/outbound"
