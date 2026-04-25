@@ -69,7 +69,15 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
         // For outbound messages initiated by the system (not in response to an inbound message),
         // use the default outbound topic
         const topic = "openclaw/outbound";
-        await mqttClient.publish(topic, text, mqtt.qos);
+        const senderId = mqttClient.getClientId() || "openclaw";
+        const outboundPayload = JSON.stringify({
+          senderId,
+          text,
+          ts: Date.now(),
+        });
+        // For outbound messages, use connection's initial user properties if available
+        const userProperties = mqttClient.getInitialUserProperties ? mqttClient.getInitialUserProperties() : undefined;
+        await mqttClient.publish(topic, outboundPayload, mqtt.qos, userProperties);
         return { ok: true };
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
@@ -264,14 +272,21 @@ async function handleInboundMessage(opts: {
 
            if (mqttClient?.isConnected()) {
             try {
+              const senderId = mqttClient.getClientId() || "openclaw";
               const outboundPayload = JSON.stringify({
-                senderId: "openclaw",
+                senderId,
                 text: payload.text,
                 kind: info.kind,
                 ts: Date.now(),
                 ...(correlationId ? { correlationId } : {}),
               });
-              await mqttClient.publish(replyTopic, outboundPayload, qos as 0 | 1 | 2);
+              
+              // Combine initial user properties with reply_to property
+              const userProperties = {
+                ...mqttClient.getInitialUserProperties(), // Include connection-time user properties
+                reply_to: replyTopic, // Add reply_to property
+              };
+              await mqttClient.publish(replyTopic, outboundPayload, qos as 0 | 1 | 2, userProperties);
               log?.info?.(`MQTT: sent reply to ${replyTopic}`);
             } catch (err) {
               log?.error?.(`MQTT: failed to send reply: ${err}`);

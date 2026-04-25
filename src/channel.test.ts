@@ -216,12 +216,19 @@ describe("mqttPlugin", () => {
       expect(result.ok).toBe(true);
 
       const mock = getMockClient();
-      expect(mock?.published).toContainEqual(
+      const publishedMsg = mock?.published[0];
+      expect(publishedMsg).toBeDefined();
+      expect(publishedMsg).toEqual(
         expect.objectContaining({
           topic: "openclaw/outbound",
-          message: "Hello from OpenClaw",
         })
       );
+
+      // Verify message is JSON formatted with senderId, text, and ts
+      const parsedMessage = JSON.parse(publishedMsg!.message);
+      expect(parsedMessage.senderId).toBe("openclaw");
+      expect(parsedMessage.text).toBe("Hello from OpenClaw");
+      expect(parsedMessage.ts).toBeDefined();
 
       controller.abort();
       await startPromise;

@@ -43,9 +43,9 @@ export class MockMqttClient extends EventEmitter {
     this.emit("connect");
   }
 
-  simulateMessage(topic: string, payload: Buffer | string) {
+  simulateMessage(topic: string, payload: Buffer | string, packet?: any) {
     const buf = typeof payload === "string" ? Buffer.from(payload) : payload;
-    this.emit("message", topic, buf);
+    this.emit("message", topic, buf, packet);
   }
 
   simulateError(err: Error) {

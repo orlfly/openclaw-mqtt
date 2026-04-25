@@ -38,11 +38,14 @@ Add to `~/.openclaw/openclaw.json`:
       // Optional auth
       username: "openclaw",
       password: "secret",
+      // Client ID (used as senderId in messages)
+      clientId: "openclaw-gateway",
       // MQTT v5.0 specific options
       protocolVersion: 5,              // Only supports MQTT 5.0
       userProperties: {                // Custom properties sent with connection
-        "application": "openclaw-mqtt",
-        "version": "1.0.0"
+        "name": "OpenClaw Gateway",
+        "description": "MQTT channel gateway",
+        "emoji": "🤖"
       },
       // Topics
       topics: {
@@ -60,6 +63,20 @@ Then restart the gateway:
 ```bash
 openclaw gateway restart
 ```
+
+### Environment Variables
+
+Sensitive configuration can be set via environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `MQTT_BROKER_URL` | MQTT broker URL |
+| `MQTT_USERNAME` | Broker username |
+| `MQTT_PASSWORD` | Broker password |
+| `MQTT_CLIENT_ID` | Client ID (used as senderId) |
+| `MQTT_USER_PROPERTIES` | JSON string of user properties |
+
+Environment variables take precedence over values in openclaw.json.
 
 ## Usage
 
@@ -93,8 +110,11 @@ The MQTT plugin uses a dynamic reply mechanism based on MQTT v5.0 userProperties
 - **Message Format**: All agent replies are published as JSON with the following structure:
 
 ```json
-{"senderId":"openclaw","text":"...","kind":"final","ts":1700000000000}
+{"senderId":"openclaw-gateway","text":"...","kind":"final","ts":1700000000000}
 ```
+
+- **senderId**: Uses `clientId` from configuration, or defaults to `"openclaw"`
+- **userProperties**: Replies include connection user properties plus `reply_to` for proper routing
 
 This dynamic reply mechanism allows publishers to control where responses are delivered, enabling flexible communication patterns between multiple services.
 

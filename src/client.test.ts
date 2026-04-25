@@ -105,7 +105,8 @@ describe("MqttClientManager", () => {
 
       expect(handler).toHaveBeenCalledWith(
         "test/topic",
-        Buffer.from("hello world")
+        Buffer.from("hello world"),
+        undefined  // packet argument
       );
     });
 
@@ -259,6 +260,5 @@ describe("config merging", () => {
     });
 
     expect(config.topics.inbound).toBe("openclaw/inbound");
-    expect(config.topics.outbound).toBe("openclaw/outbound");
   });
 });

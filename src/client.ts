@@ -5,9 +5,11 @@ import { mergeWithEnv } from "./env.js";
 export interface MqttClientManager {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
-  publish(topic: string, message: string, qos?: 0 | 1 | 2): Promise<void>;
+  publish(topic: string, message: string, qos?: 0 | 1 | 2, userProperties?: Record<string, string>): Promise<void>;
   subscribe(topic: string, handler: MessageHandler): void;
   isConnected(): boolean;
+  getInitialUserProperties(): Record<string, string> | undefined;
+  getClientId(): string | undefined;
 }
 
 export type MessageHandler = (topic: string, payload: Buffer, packet?: any) => void;
@@ -40,6 +42,7 @@ export function createMqttClient(
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let connectPromise: Promise<void> | null = null;
   let manualDisconnect = false;
+  const initialUserProperties = { ...config.userProperties }; // Save initial user properties
 
   function getClientOptions(): IClientOptions {
     const options: IClientOptions = {
@@ -280,14 +283,26 @@ export function createMqttClient(
   async function publish(
     topic: string,
     message: string,
-    qos: 0 | 1 | 2 = config.qos
+    qos: 0 | 1 | 2 = config.qos,
+    userProperties?: Record<string, string>
   ): Promise<void> {
     if (!client?.connected) {
       throw new Error("MQTT not connected");
     }
 
+    // Prepare publish options with user properties if available
+    const options: any = { qos };
+    if (userProperties && Object.keys(userProperties).length > 0) {
+      options.properties = {
+        userProperties: {
+          ...userProperties
+        }
+      };
+    }
+    const properties_str = JSON.stringify(options)
+    logger.info(`properties to ${properties_str}`);
     return new Promise((resolve, reject) => {
-      client!.publish(topic, message, { qos }, (err) => {
+      client!.publish(topic, message, options, (err) => {
         if (err) {
           logger.error(`Failed to publish to ${topic}: ${err.message}`);
           reject(err);
@@ -320,12 +335,24 @@ export function createMqttClient(
     return client?.connected ?? false;
   }
 
+  function getInitialUserProperties(): Record<string, string> | undefined {
+    return initialUserProperties && Object.keys(initialUserProperties).length > 0 
+      ? { ...initialUserProperties } 
+      : undefined;
+  }
+
+  function getClientId(): string | undefined {
+    return config.clientId;
+  }
+
   return {
     connect,
     disconnect,
     publish,
     subscribe,
     isConnected,
+    getInitialUserProperties,
+    getClientId,
   };
 }
 
