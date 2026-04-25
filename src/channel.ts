@@ -7,6 +7,9 @@ import { getMqttRuntime } from "./runtime.js";
 // Global client instance (one per gateway lifecycle)
 let mqttClient: MqttClientManager | null = null;
 
+// Track joined group topics for group chat
+const joinedGroups: Set<string> = new Set();
+
 /**
  * MQTT Channel Plugin for OpenClaw
  *
@@ -157,6 +160,154 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
 };
 
 /**
+ * Handle inbound MQTT group message - process through OpenClaw agent and deliver reply
+ */
+async function handleGroupMessage(opts: {
+  topic: string;
+  groupTopic: string;
+  payload: Buffer;
+  packet: any;
+  runtime: any;
+  cfg: any;
+  accountId: string;
+  log: any;
+  qos: number;
+}) {
+  const { topic, groupTopic, payload, packet, runtime, cfg, accountId, log, qos } = opts;
+
+  try {
+    const text = payload.toString("utf-8");
+    log?.info?.(`Inbound MQTT group message on ${topic} (group: ${groupTopic}): ${text.slice(0, 200)}${text.length > 200 ? "..." : ""}`);
+
+    // Get my own senderId for filtering self-sent messages
+    const mySenderId = mqttClient?.getClientId() || "openclaw";
+
+    // Parse JSON if possible to extract structured data
+    let parsedPayload: Record<string, unknown> | null = null;
+    try {
+      parsedPayload = JSON.parse(text);
+    } catch {
+      parsedPayload = null;
+    }
+
+    // Extract message body and sender from payload
+    let messageBody: string;
+    let senderId: string;
+    let correlationId: string | undefined;
+
+    if (parsedPayload && typeof parsedPayload === "object") {
+      messageBody =
+        (parsedPayload.message as string) ??
+        (parsedPayload.text as string) ??
+        (parsedPayload.msg as string) ??
+        (parsedPayload.alert as string) ??
+        (parsedPayload.body as string) ??
+        text;
+
+      senderId =
+        (parsedPayload.senderId as string) ??
+        (parsedPayload.source as string) ??
+        (parsedPayload.sender as string) ??
+        (parsedPayload.from as string) ??
+        (parsedPayload.service as string) ??
+        topic.replace(/\//g, "-");
+
+      correlationId =
+        (parsedPayload.correlationId as string) ??
+        (parsedPayload.requestId as string) ??
+        undefined;
+
+      // Filter out messages sent by ourselves
+      if (senderId === mySenderId) {
+        log?.debug?.(`MQTT: ignoring self-sent message from ${senderId}`);
+        return;
+      }
+    } else {
+      messageBody = text;
+      senderId = topic.replace(/\//g, "-");
+    }
+
+    // Build the inbound context using OpenClaw's standard format
+    const ctxPayload = runtime.channel.reply.finalizeInboundContext({
+      Body: messageBody,
+      RawBody: text,
+      CommandBody: messageBody,
+      CommandAuthorized: true,
+      From: `mqtt:${senderId}`,
+      To: `mqtt:${accountId}`,
+      SessionKey: `agent:main:mqtt:${senderId}`, // Using senderId to maintain session per sender within group
+      AccountId: accountId,
+      ChatType: "direct",
+      ConversationLabel: `mqtt:group:${groupTopic}`, // Group-specific conversation label
+      SenderName: senderId,
+      SenderId: senderId,
+      Provider: "mqtt",
+      Surface: "mqtt",
+      MessageSid: `mqtt-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      Timestamp: Date.now(),
+    });
+
+    // inbound context logging removed
+
+    // Dispatch through OpenClaw's reply system and publish replies
+    await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+      ctx: ctxPayload,
+      cfg,
+      dispatcherOptions: {
+        deliver: async (payload: { text?: string; media?: any }, info: { kind: string }) => {
+          if (!payload.text) {
+            log?.debug?.(`MQTT: skipping empty ${info.kind} reply`);
+            return;
+          }
+
+          log?.info?.(`MQTT group reply (${info.kind}) [${payload.text.length} chars]`);
+
+           if (mqttClient?.isConnected()) {
+            try {
+              const senderId = mqttClient.getClientId() || "openclaw";
+              const outboundPayload = JSON.stringify({
+                senderId,
+                text: payload.text,
+                kind: info.kind,
+                ts: Date.now(),
+                ...(correlationId ? { correlationId } : {}),
+              });
+              
+              // For group messages, reply to the same group topic
+              const userProperties = {
+                ...mqttClient.getInitialUserProperties(), // Include connection-time user properties
+                reply_to: groupTopic, // Reply to the group topic
+              };
+              await mqttClient.publish(groupTopic, outboundPayload, qos as 0 | 1 | 2, userProperties);
+              log?.info?.(`MQTT: sent group reply to ${groupTopic}`);
+            } catch (err) {
+              log?.error?.(`MQTT: failed to send group reply: ${err}`);
+            }
+          } else {
+            log?.warn?.(`MQTT: not connected, cannot send group reply`);
+          }
+        },
+        onSkip: (_payload: any, info: { reason: string }) => {
+          log?.debug?.(`MQTT: skipped group reply (${info.reason})`);
+        },
+        onError: (err: Error, info: { kind: string }) => {
+          log?.error?.(`MQTT: ${info.kind} group reply error: ${err}`);
+        },
+      },
+      replyOptions: {
+        disableBlockStreaming: true,
+      },
+    });
+
+    // dispatch complete
+
+    log?.info?.(`MQTT group message processed from ${senderId} in group ${groupTopic}`);
+  } catch (err) {
+    log?.error?.(`Failed to process MQTT group message: ${err}`);
+  }
+}
+
+/**
  * Handle inbound MQTT message - process through OpenClaw agent and deliver reply
  */
 async function handleInboundMessage(opts: {
@@ -175,15 +326,10 @@ async function handleInboundMessage(opts: {
     const text = payload.toString("utf-8");
     log?.info?.(`Inbound MQTT message on ${topic}: ${text.slice(0, 200)}${text.length > 200 ? "..." : ""}`);
 
-    // Log user properties if present
-    if (packet && packet.properties && packet.properties.userProperties) {
-      const userProps = packet.properties.userProperties;
-      log?.info?.(`MQTT message user properties: ${JSON.stringify(userProps)}`);
-    } else {
-      log?.info?.('MQTT message has no user properties');
-    }
+    // Get my own senderId for filtering self-sent messages
+    const mySenderId = mqttClient?.getClientId() || "openclaw";
 
-    // Get the reply topic from userProperties or fallback to default
+    // Determine reply topic from user properties (for MQTT v5.0)
     let replyTopic = "openclaw/outbound"; // Default fallback
     if (packet && packet.properties && packet.properties.userProperties) {
       const userProps = packet.properties.userProperties;
@@ -230,6 +376,66 @@ async function handleInboundMessage(opts: {
         (parsedPayload.correlationId as string) ??
         (parsedPayload.requestId as string) ??
         undefined;
+
+      // Filter out messages sent by ourselves
+      if (senderId === mySenderId) {
+        log?.debug?.(`MQTT: ignoring self-sent message from ${senderId}`);
+        return;
+      }
+
+      // Handle group chat invite messages
+      const messageKind = (parsedPayload?.kind as string) ?? "direct";
+      if (messageKind === "invite" && parsedPayload) {
+        const groupTopic = (parsedPayload.topic as string) ?? topic;
+        
+        // Check if already joined
+        if (joinedGroups.has(groupTopic)) {
+          log?.debug?.(`MQTT: already joined group ${groupTopic}, skipping invite`);
+          return;
+        }
+        
+        joinedGroups.add(groupTopic);
+        log?.info?.(`MQTT invite: joining group ${groupTopic}`);
+
+        if (mqttClient?.isConnected()) {
+          try {
+            // Subscribe to the group topic - use handleGroupMessage for group messages
+            mqttClient.subscribe(groupTopic, async (t: string, payload: Buffer, pkt: any) => {
+              await handleGroupMessage({
+                topic: t,
+                groupTopic: groupTopic,
+                payload,
+                packet: pkt,
+                runtime,
+                cfg,
+                accountId,
+                log,
+                qos: qos,
+              });
+            });
+            log?.info?.(`MQTT: subscribed to group ${groupTopic}`);
+
+            // Send "invite accepted" message to the group topic
+            const senderId = mqttClient.getClientId() || "openclaw";
+            const acceptPayload = JSON.stringify({
+              senderId,
+              text: "invite accepted",
+              kind: "accept",
+              ts: Date.now(),
+            });
+            const userProperties = {
+              ...mqttClient.getInitialUserProperties(),
+            };
+            await mqttClient.publish(groupTopic, acceptPayload, qos as 0 | 1 | 2, userProperties);
+            log?.info?.(`MQTT: sent invite accepted to ${groupTopic}`);
+          } catch (err) {
+            log?.error?.(`MQTT: failed to process invite: ${err}`);
+          }
+        }
+
+        log?.info?.(`MQTT invite processed for ${groupTopic}`);
+        return;
+      }
     } else {
       messageBody = text;
       senderId = topic.replace(/\//g, "-");
@@ -314,3 +520,5 @@ async function handleInboundMessage(opts: {
     log?.error?.(`Failed to process MQTT message: ${err}`);
   }
 }
+
+
