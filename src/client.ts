@@ -7,6 +7,7 @@ export interface MqttClientManager {
   disconnect(): Promise<void>;
   publish(topic: string, message: string, qos?: 0 | 1 | 2, userProperties?: Record<string, string>): Promise<void>;
   subscribe(topic: string, handler: MessageHandler): void;
+  unsubscribe(topic: string, callback?: (error?: Error) => void): void;
   isConnected(): boolean;
   getInitialUserProperties(): Record<string, string> | undefined;
   getClientId(): string | undefined;
@@ -345,11 +346,33 @@ export function createMqttClient(
     return config.clientId;
   }
 
+  function unsubscribe(topic: string, callback?: (error?: Error) => void): void {
+    // Remove the topic from message handlers
+    messageHandlers.delete(topic);
+    
+    // If connected, unsubscribe from the MQTT broker
+    if (client?.connected) {
+      client.unsubscribe(topic, (err) => {
+        if (err) {
+          logger.error(`Failed to unsubscribe from ${topic}: ${err.message}`);
+          callback?.(err);
+        } else {
+          logger.debug(`Unsubscribed from ${topic}`);
+          callback?.();
+        }
+      });
+    } else {
+      // If not connected, just remove from local handlers and call callback
+      callback?.();
+    }
+  }
+
   return {
     connect,
     disconnect,
     publish,
     subscribe,
+    unsubscribe,
     isConnected,
     getInitialUserProperties,
     getClientId,

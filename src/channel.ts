@@ -451,6 +451,38 @@ async function handleInboundMessage(opts: {
         log?.info?.(`MQTT invite processed for ${groupTopic}`);
         return;
       }
+      
+      // Handle group chat dismissed messages
+      if (messageKind === "dismissed" && parsedPayload) {
+        const groupTopic = (parsedPayload.topic as string) ?? topic;
+        
+        // Check if we've joined this group
+        if (!joinedGroups.has(groupTopic)) {
+          log?.debug?.(`MQTT: not member of group ${groupTopic}, skipping dismiss message`);
+          return;
+        }
+        
+        joinedGroups.delete(groupTopic);
+        log?.info?.(`MQTT: removing from group ${groupTopic} (dismissed by admin)`);
+        
+        if (mqttClient?.isConnected()) {
+          try {
+            // Unsubscribe from the group topic
+            mqttClient.unsubscribe(groupTopic, (err) => {
+              if (err) {
+                log?.error?.(`MQTT: failed to unsubscribe from group ${groupTopic}: ${err?.message}`);
+              } else {
+                log?.info?.(`MQTT: unsubscribed from group ${groupTopic}`);
+              }
+            });
+          } catch (err) {
+            log?.error?.(`MQTT: failed to process dismiss: ${err}`);
+          }
+        }
+        
+        log?.info?.(`MQTT dismiss processed for ${groupTopic}`);
+        return;
+      }
     } else {
       messageBody = text;
       senderId = topic.replace(/\//g, "-");
