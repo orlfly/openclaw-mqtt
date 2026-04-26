@@ -222,6 +222,21 @@ async function handleGroupMessage(opts: {
         log?.debug?.(`MQTT: ignoring self-sent message from ${senderId}`);
         return;
       }
+
+      // Check targetIds attribute if it exists - ignore messages not targeting this client
+      if (parsedPayload.targetIds) {
+        const targetIds = parsedPayload.targetIds as string[] | string;
+        const myClientId = mqttClient?.getClientId() || "openclaw";
+        
+        // Convert to array if it's a single string
+        const targetsArray = Array.isArray(targetIds) ? targetIds : [targetIds];
+        
+        // If targetIds doesn't contain my client ID, ignore the message
+        if (!targetsArray.some(id => id.includes(myClientId))) {
+          log?.debug?.(`MQTT: ignoring message with targetIds '${JSON.stringify(targetsArray)}' not meant for client '${myClientId}'`);
+          return;
+        }
+      }
     } else {
       messageBody = text;
       senderId = topic.replace(/\//g, "-");
