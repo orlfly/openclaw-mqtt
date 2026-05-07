@@ -23,3 +23,15 @@ export interface MqttOutboundMessage {
   qos?: 0 | 1 | 2;
   retain?: boolean;
 }
+
+export interface MqttMessage {
+  id: string;
+  text?: string;
+  senderId: string;
+  timestamp: Date;
+  targetIds?: string[];
+  type?: 'text' | 'file';
+  fileName?: string;
+  fileType?: string;
+  fileData?: string;
+}

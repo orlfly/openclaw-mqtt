@@ -81,7 +81,7 @@ describe("mqttPlugin", () => {
   describe("capabilities", () => {
     it("should support direct chat only", () => {
       expect(mqttPlugin.capabilities.chatTypes).toContain("direct");
-      expect(mqttPlugin.capabilities.supportsMedia).toBe(false);
+      expect(mqttPlugin.capabilities.supportsMedia).toBe(true);
       expect(mqttPlugin.capabilities.supportsReactions).toBe(false);
     });
   });
@@ -152,9 +152,11 @@ describe("mqttPlugin", () => {
       mock?.simulateMessage(
         "openclaw/inbound",
         JSON.stringify({
-          message: "Server CPU high",
-          source: "uptime-kuma",
-          severity: "warning",
+          id: "msg-001",
+          text: "Server CPU high",
+          senderId: "uptime-kuma",
+          timestamp: new Date().toISOString(),
+          type: "text",
         })
       );
 
@@ -167,16 +169,18 @@ describe("mqttPlugin", () => {
       await startPromise;
     });
 
-    it("should echo correlationId in outbound replies", async () => {
+    it("should echo senderId in outbound replies", async () => {
       const { controller, startPromise } = await startAccount();
 
       const mock = getMockClient();
       mock?.simulateMessage(
         "openclaw/inbound",
         JSON.stringify({
-          message: "ping",
+          id: "msg-002",
+          text: "ping",
           senderId: "pg-test",
-          correlationId: "corr-123",
+          timestamp: new Date().toISOString(),
+          type: "text",
         })
       );
 
@@ -184,7 +188,10 @@ describe("mqttPlugin", () => {
       expect(published.length).toBeGreaterThan(0);
       const last = published[published.length - 1];
       const data = JSON.parse(last.message as string);
-      expect(data.correlationId).toBe("corr-123");
+      expect(data.senderId).toBe("openclaw");
+      expect(data.text).toBe("test reply");
+      expect(data.id).toBeDefined();
+      expect(data.timestamp).toBeDefined();
 
       controller.abort();
       await startPromise;
@@ -211,6 +218,7 @@ describe("mqttPlugin", () => {
       const result = await mqttPlugin.outbound.sendText({
         text: "Hello from OpenClaw",
         cfg: defaultCfg as any,
+        to: "openclaw/outbound",
       } as any);
 
       expect(result.ok).toBe(true);
@@ -224,11 +232,13 @@ describe("mqttPlugin", () => {
         })
       );
 
-      // Verify message is JSON formatted with senderId, text, and ts
+      // Verify message is JSON formatted with MqttMessage fields
       const parsedMessage = JSON.parse(publishedMsg!.message);
       expect(parsedMessage.senderId).toBe("openclaw");
       expect(parsedMessage.text).toBe("Hello from OpenClaw");
-      expect(parsedMessage.ts).toBeDefined();
+      expect(parsedMessage.id).toBeDefined();
+      expect(parsedMessage.timestamp).toBeDefined();
+      expect(parsedMessage.type).toBe("text");
 
       controller.abort();
       await startPromise;
@@ -252,6 +262,157 @@ describe("mqttPlugin", () => {
 
       expect(result.ok).toBe(false);
       expect(result.error).toBe("MQTT not connected");
+    });
+  });
+
+  describe("outbound.sendMedia", () => {
+    const smallBase64 = "SGVsbG8gV29ybGQ="; // "Hello World" - 11 bytes
+    const smallDataUrl = `data:text/plain;base64,${smallBase64}`;
+
+    it("should publish file message with data URL", async () => {
+      const { controller, startPromise } = await startAccount();
+
+      const result = await mqttPlugin.outbound.sendMedia({
+        mediaUrl: smallDataUrl,
+        text: "hello.txt",
+        cfg: defaultCfg as any,
+        to: "openclaw/outbound",
+      } as any);
+
+      expect(result.ok).toBe(true);
+
+      const mock = getMockClient();
+      const publishedMsg = mock?.published[0];
+      expect(publishedMsg).toBeDefined();
+      expect(publishedMsg).toEqual(
+        expect.objectContaining({
+          topic: "openclaw/outbound",
+        })
+      );
+
+      const parsedMessage = JSON.parse(publishedMsg!.message);
+      expect(parsedMessage.senderId).toBe("openclaw");
+      expect(parsedMessage.type).toBe("file");
+      expect(parsedMessage.fileName).toBe("hello.txt");
+      expect(parsedMessage.fileType).toBe("text/plain");
+      expect(parsedMessage.fileData).toBe(smallBase64);
+      expect(parsedMessage.id).toBeDefined();
+      expect(parsedMessage.timestamp).toBeDefined();
+
+      controller.abort();
+      await startPromise;
+    });
+
+    it("should publish file message with raw base64 URL", async () => {
+      const { controller, startPromise } = await startAccount();
+
+      const result = await mqttPlugin.outbound.sendMedia({
+        mediaUrl: smallBase64,
+        text: "hello.txt",
+        cfg: defaultCfg as any,
+        to: "openclaw/outbound",
+      } as any);
+
+      expect(result.ok).toBe(true);
+
+      const mock = getMockClient();
+      const parsedMessage = JSON.parse(mock!.published[0].message);
+      expect(parsedMessage.type).toBe("file");
+      expect(parsedMessage.fileData).toBe(smallBase64);
+      expect(parsedMessage.fileName).toBe("hello.txt");
+
+      controller.abort();
+      await startPromise;
+    });
+
+    it("should extract fileName and mimeType from data URL", async () => {
+      const { controller, startPromise } = await startAccount();
+
+      const result = await mqttPlugin.outbound.sendMedia({
+        mediaUrl: "data:application/pdf;base64," + smallBase64,
+        cfg: defaultCfg as any,
+        to: "openclaw/outbound",
+      } as any);
+
+      expect(result.ok).toBe(true);
+
+      const mock = getMockClient();
+      const parsedMessage = JSON.parse(mock!.published[0].message);
+      expect(parsedMessage.fileType).toBe("application/pdf");
+
+      controller.abort();
+      await startPromise;
+    });
+
+    it("should fail if not configured", async () => {
+      const result = await mqttPlugin.outbound.sendMedia({
+        mediaUrl: smallDataUrl,
+        cfg: {} as any,
+      } as any);
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("MQTT not configured");
+    });
+
+    it("should fail if not connected", async () => {
+      const result = await mqttPlugin.outbound.sendMedia({
+        mediaUrl: smallDataUrl,
+        cfg: defaultCfg as any,
+      } as any);
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("MQTT not connected");
+    });
+
+    it("should fail if media URL is missing", async () => {
+      const { controller, startPromise } = await startAccount();
+
+      const result = await mqttPlugin.outbound.sendMedia({
+        cfg: defaultCfg as any,
+        to: "openclaw/outbound",
+      } as any);
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("Media URL is required");
+
+      controller.abort();
+      await startPromise;
+    });
+
+    it("should reject files exceeding 10MB limit", async () => {
+      const { controller, startPromise } = await startAccount();
+
+      const oversizedBase64 = "A".repeat(Math.ceil((10 * 1024 * 1024 + 1) * 4 / 3) + 1);
+      const result = await mqttPlugin.outbound.sendMedia({
+        mediaUrl: `data:application/octet-stream;base64,${oversizedBase64}`,
+        text: "big.bin",
+        cfg: defaultCfg as any,
+        to: "openclaw/outbound",
+      } as any);
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("File size exceeds limit");
+
+      controller.abort();
+      await startPromise;
+    });
+
+    it("should accept files at exactly 10MB", async () => {
+      const { controller, startPromise } = await startAccount();
+
+      const exactBytes = 10 * 1024 * 1024;
+      const exactBase64 = "A".repeat(Math.ceil(exactBytes * 4 / 3));
+      const result = await mqttPlugin.outbound.sendMedia({
+        mediaUrl: exactBase64,
+        text: "exact10mb.bin",
+        cfg: defaultCfg as any,
+        to: "openclaw/outbound",
+      } as any);
+
+      expect(result.ok).toBe(true);
+
+      controller.abort();
+      await startPromise;
     });
   });
 });
@@ -328,11 +489,11 @@ describe("inbound message parsing", () => {
     const { controller, startPromise } = await startAccount();
 
     const testCases = [
-      { input: { message: "msg1" }, expected: "msg1" },
-      { input: { text: "msg2" }, expected: "msg2" },
-      { input: { msg: "msg3" }, expected: "msg3" },
-      { input: { alert: "msg4" }, expected: "msg4" },
-      { input: { body: "msg5" }, expected: "msg5" },
+      { input: { id: "m1", text: "msg1", senderId: "s1", timestamp: new Date().toISOString() }, expected: "msg1" },
+      { input: { id: "m2", text: "msg2", senderId: "s1", timestamp: new Date().toISOString() }, expected: "msg2" },
+      { input: { id: "m3", text: "msg3", senderId: "s1", timestamp: new Date().toISOString() }, expected: "msg3" },
+      { input: { id: "m4", text: "msg4", senderId: "s1", timestamp: new Date().toISOString() }, expected: "msg4" },
+      { input: { id: "m5", text: "msg5", senderId: "s1", timestamp: new Date().toISOString() }, expected: "msg5" },
     ];
 
     for (const { input, expected } of testCases) {
@@ -351,10 +512,10 @@ describe("inbound message parsing", () => {
     const { controller, startPromise } = await startAccount();
 
     const testCases = [
-      { input: { message: "x", source: "src1" }, expectedSender: "src1" },
-      { input: { message: "x", sender: "src2" }, expectedSender: "src2" },
-      { input: { message: "x", from: "src3" }, expectedSender: "src3" },
-      { input: { message: "x", service: "src4" }, expectedSender: "src4" },
+      { input: { id: "m1", text: "x", senderId: "src1", timestamp: new Date().toISOString() }, expectedSender: "src1" },
+      { input: { id: "m2", text: "x", senderId: "src2", timestamp: new Date().toISOString() }, expectedSender: "src2" },
+      { input: { id: "m3", text: "x", senderId: "src3", timestamp: new Date().toISOString() }, expectedSender: "src3" },
+      { input: { id: "m4", text: "x", senderId: "src4", timestamp: new Date().toISOString() }, expectedSender: "src4" },
     ];
 
     for (const { input, expectedSender } of testCases) {

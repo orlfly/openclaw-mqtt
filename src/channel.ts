@@ -1,14 +1,22 @@
 import type { ChannelPlugin } from "openclaw/plugin-sdk";
-import type { MqttCoreConfig } from "./types.js";
+import type { MqttCoreConfig, MqttMessage } from "./types.js";
 import { createMqttClient, MqttClientManager } from "./client.js";
 import { mqttOnboardingAdapter } from "./onboarding.js";
 import { getMqttRuntime } from "./runtime.js";
+import * as fs from "fs";
+import * as path from "path";
 
 // Global client instance (one per gateway lifecycle)
 let mqttClient: MqttClientManager | null = null;
 
 // Track joined group topics for group chat
 const joinedGroups: Set<string> = new Set();
+
+// Store reply topics for active conversations: senderId -> replyTopic
+const replyTopicMap: Map<string, string> = new Map();
+
+// File size limit: 10MB
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 
 /**
  * MQTT Channel Plugin for OpenClaw
@@ -30,9 +38,26 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
 
   capabilities: {
     chatTypes: ["direct"],
-    supportsMedia: false,
+    supportsMedia: true,
     supportsReactions: false,
     supportsThreads: false,
+  },
+
+  // Help framework recognize MQTT targets (fixes "Unknown target" for plugin channels)
+  messaging: {
+    normalizeTarget: (raw: string): string | undefined => {
+      const trimmed = raw.trim();
+      if (!trimmed) return undefined;
+      // Strip optional "mqtt:" prefix for convenience
+      return trimmed.replace(/^mqtt:/i, "") || undefined;
+    },
+    targetResolver: {
+      looksLikeId: (_raw: string, normalized?: string): boolean => {
+        // MQTT targets are topic paths (any non-empty string is valid)
+        return !!normalized?.trim();
+      },
+      hint: "<topic-path|senderId>",
+    },
   },
 
   config: {
@@ -58,30 +83,83 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
   outbound: {
     deliveryMode: "direct",
 
-    async sendText({ text, cfg }: { text: string; cfg: any }) {
-      const mqtt = cfg.channels?.mqtt;
-      if (!mqtt?.brokerUrl) {
-        return { ok: false, error: "MQTT not configured" };
+    resolveTarget: (params: any) => {
+      const to = params?.to ?? params;
+      if (!to?.trim()) {
+        return { ok: false, error: new Error("MQTT target required") };
       }
+      // Accept any non-empty target; sendMedia will resolve via replyTopicMap if needed
+      return { ok: true, to: to.trim() };
+    },
 
-      if (!mqttClient || !mqttClient.isConnected()) {
-        return { ok: false, error: "MQTT not connected" };
-      }
+    async sendText(params: any) {
+      const { cfg, to, text, signal } = params;
+      if (signal?.aborted) return { ok: false, error: "Aborted" };
+
+      const mqtt = cfg?.channels?.mqtt;
+      if (!mqtt?.brokerUrl) return { ok: false, error: "MQTT not configured" };
+      if (!mqttClient || !mqttClient.isConnected()) return { ok: false, error: "MQTT not connected" };
+      if (!text) return { ok: false, error: "Text required" };
 
       try {
-        // For outbound messages initiated by the system (not in response to an inbound message),
-        // use the default outbound topic
-        const topic = "openclaw/outbound";
-        const senderId = mqttClient.getClientId() || "openclaw";
-        const outboundPayload = JSON.stringify({
-          senderId,
-          text,
-          ts: Date.now(),
-        });
-        // For outbound messages, use connection's initial user properties if available
+        const topic = to ?? "openclaw/outbound";
+        const senderId = mqtt?.clientId ?? mqttClient?.getClientId() ?? "openclaw";
+        const outboundMsg = buildOutboundMessage(senderId, { text });
+        const outboundPayload = JSON.stringify(outboundMsg);
         const userProperties = mqttClient.getInitialUserProperties ? mqttClient.getInitialUserProperties() : undefined;
         await mqttClient.publish(topic, outboundPayload, mqtt.qos, userProperties);
-        return { ok: true };
+        return { ok: true, channel: "mqtt", to: topic };
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        return { ok: false, error };
+      }
+    },
+
+    async sendMedia(params: any) {
+      const { cfg, to, text, mediaUrl, filePath, media, signal } = params;
+      if (signal?.aborted) return { ok: false, error: "Aborted" };
+
+      const mqtt = cfg?.channels?.mqtt;
+      if (!mqtt?.brokerUrl) return { ok: false, error: "MQTT not configured" };
+      if (!mqttClient || !mqttClient.isConnected()) return { ok: false, error: "MQTT not connected" };
+      // Support both 'media' (used by framework) and 'mediaUrl'/'filePath' (standard)
+      const resolvedPath = media || filePath || mediaUrl;
+      if (!resolvedPath) return { ok: false, error: "Media URL or file path is required" };
+
+      try {
+        // Support both mediaUrl and filePath (OpenClaw uses filePath)
+        const url = mediaUrl || filePath;
+        const { fileData, fileName: extractedName, fileType, sizeBytes } = extractMediaData({ url, fileName: text });
+        if (sizeBytes > MAX_FILE_SIZE_BYTES) {
+          return { ok: false, error: `File size exceeds limit. Max: ${MAX_FILE_SIZE_BYTES / (1024 * 1024)}MB, Got: ${(sizeBytes / (1024 * 1024)).toFixed(2)}MB` };
+        }
+
+        // Determine topic: use replyTopicMap if to is the default "mqtt:default"
+        let rawTopic = to ?? "openclaw/outbound";
+
+        if (rawTopic === "mqtt:default" || rawTopic === "default") {
+          // Try to find the real reply topic from the map using senderId extracted from 'to'
+          const mapKey = to.startsWith("mqtt:") ? to.slice(5) : to;
+          const storedTopic = replyTopicMap.get(mapKey);
+          if (storedTopic) {
+            rawTopic = storedTopic;
+          }
+        }
+
+        const topic = rawTopic.startsWith("mqtt:") ? rawTopic.slice(5) : rawTopic;
+
+        const senderId = mqtt?.clientId ?? mqttClient?.getClientId() ?? "openclaw";
+        const outboundMsg = buildOutboundMessage(senderId, {
+          type: 'file',
+          text,
+          fileName: extractedName,
+          fileType,
+          fileData,
+        });
+        const outboundPayload = JSON.stringify(outboundMsg);
+        const userProperties = mqttClient.getInitialUserProperties ? mqttClient.getInitialUserProperties() : undefined;
+        await mqttClient.publish(topic, outboundPayload, mqtt.qos, userProperties);
+        return { ok: true, channel: "mqtt", to: topic };
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
         return { ok: false, error };
@@ -159,6 +237,93 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
   onboarding: mqttOnboardingAdapter,
 };
 
+function generateMessageId(): string {
+  return `mqtt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function getMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const map: Record<string, string> = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".txt": "text/plain",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".json": "application/json",
+    ".zip": "application/zip",
+  };
+  return map[ext] ?? "application/octet-stream";
+}
+
+function extractMediaData(media: { url: string; mimeType?: string; fileName?: string }): {
+  fileData: string;
+  fileName: string;
+  fileType: string;
+  sizeBytes: number;
+} {
+  let fileData: string;
+  let fileName = media.fileName ?? "unknown";
+  let fileType = media.mimeType ?? "application/octet-stream";
+
+  if (media.url.startsWith("data:")) {
+    // data URL format: data:mime;base64,...
+    const commaIdx = media.url.indexOf(",");
+    if (commaIdx === -1) throw new Error("Invalid data URL format");
+    const header = media.url.slice(0, commaIdx);
+    fileData = media.url.slice(commaIdx + 1);
+
+    const mimeMatch = header.match(/^data:([^;]+)/);
+    if (mimeMatch && !media.mimeType) fileType = mimeMatch[1];
+    if (header.includes(";name=")) {
+      const nameMatch = header.match(/;name=([^;]+)/);
+      if (nameMatch && !media.fileName) fileName = decodeURIComponent(nameMatch[1]);
+    }
+  } else if (media.url.startsWith("file://")) {
+    // file:// URL format
+    const filePath = media.url.slice(7);
+    const buf = fs.readFileSync(filePath);
+    fileData = buf.toString("base64");
+    if (!media.mimeType) fileType = getMimeType(filePath);
+    if (!media.fileName) fileName = path.basename(filePath);
+  } else if (media.url.startsWith("/") || media.url.includes(":\\")) {
+    // raw file path format (absolute path)
+    const buf = fs.readFileSync(media.url);
+    fileData = buf.toString("base64");
+    if (!media.mimeType) fileType = getMimeType(media.url);
+    if (!media.fileName) fileName = path.basename(media.url);
+  } else {
+    // treat as raw base64 string
+    fileData = media.url;
+  }
+
+  const sizeBytes = Math.floor((fileData.length * 3) / 4);
+  return { fileData, fileName, fileType, sizeBytes };
+}
+
+function buildOutboundMessage(senderId: string, opts: {
+  text?: string;
+  type?: 'text' | 'file';
+  fileName?: string;
+  fileType?: string;
+  fileData?: string;
+  targetIds?: string[];
+}): MqttMessage {
+  return {
+    id: generateMessageId(),
+    senderId,
+    text: opts.text,
+    timestamp: new Date(),
+    type: opts.type ?? 'text',
+    ...(opts.fileName ? { fileName: opts.fileName } : {}),
+    ...(opts.fileType ? { fileType: opts.fileType } : {}),
+    ...(opts.fileData ? { fileData: opts.fileData } : {}),
+    ...(opts.targetIds ? { targetIds: opts.targetIds } : {}),
+  };
+}
+
 /**
  * Handle inbound MQTT group message - process through OpenClaw agent and deliver reply
  */
@@ -179,10 +344,8 @@ async function handleGroupMessage(opts: {
     const text = payload.toString("utf-8");
     log?.info?.(`Inbound MQTT group message on ${topic} (group: ${groupTopic}): ${text.slice(0, 200)}${text.length > 200 ? "..." : ""}`);
 
-    // Get my own senderId for filtering self-sent messages
     const mySenderId = mqttClient?.getClientId() || "openclaw";
 
-    // Parse JSON if possible to extract structured data
     let parsedPayload: Record<string, unknown> | null = null;
     try {
       parsedPayload = JSON.parse(text);
@@ -190,76 +353,68 @@ async function handleGroupMessage(opts: {
       parsedPayload = null;
     }
 
-    // Extract message body and sender from payload
+    let msg: MqttMessage | null = null;
+    if (parsedPayload && parsedPayload.senderId) {
+      msg = parsedPayload as unknown as MqttMessage;
+    }
+
     let messageBody: string;
     let senderId: string;
-    let correlationId: string | undefined;
+    let messageType: string = "text";
+    let fileMedia: Array<{ url: string; mimeType?: string; fileName?: string }> | undefined;
 
-    if (parsedPayload && typeof parsedPayload === "object") {
-      messageBody =
-        (parsedPayload.message as string) ??
-        (parsedPayload.text as string) ??
-        (parsedPayload.msg as string) ??
-        (parsedPayload.alert as string) ??
-        (parsedPayload.body as string) ??
-        text;
+    if (msg) {
+      senderId = msg.senderId;
 
-      senderId =
-        (parsedPayload.senderId as string) ??
-        (parsedPayload.source as string) ??
-        (parsedPayload.sender as string) ??
-        (parsedPayload.from as string) ??
-        (parsedPayload.service as string) ??
-        topic.replace(/\//g, "-");
-
-      correlationId =
-        (parsedPayload.correlationId as string) ??
-        (parsedPayload.requestId as string) ??
-        undefined;
-
-      // Filter out messages sent by ourselves
       if (senderId === mySenderId) {
         log?.debug?.(`MQTT: ignoring self-sent message from ${senderId}`);
         return;
       }
 
-      // Check targetIds attribute if it exists - ignore messages not targeting this client
-      if (parsedPayload.targetIds) {
-        const targetIds = parsedPayload.targetIds as string[] | string;
+      if (msg.targetIds && msg.targetIds.length > 0) {
         const myClientId = mqttClient?.getClientId() || "openclaw";
-        
-        // Convert to array if it's a single string
-        const targetsArray = Array.isArray(targetIds) ? targetIds : [targetIds];
-        
-        // If targetIds doesn't contain my client ID, ignore the message
-        if (!targetsArray.some(id => id.includes(myClientId))) {
-          log?.debug?.(`MQTT: ignoring message with targetIds '${JSON.stringify(targetsArray)}' not meant for client '${myClientId}'`);
+        if (!msg.targetIds.some(id => id.includes(myClientId))) {
+          log?.debug?.(`MQTT: ignoring message with targetIds not meant for client '${myClientId}'`);
           return;
         }
+      }
+
+      messageType = msg.type ?? "text";
+      if (messageType === "file") {
+        const fileName = msg.fileName ?? "unknown";
+        const fileType = msg.fileType ?? "application/octet-stream";
+        messageBody = msg.text ?? `[File: ${fileName} (${fileType})]`;
+
+        if (msg.fileData) {
+          const dataUrl = `data:${fileType};base64,${msg.fileData}`;
+          fileMedia = [{ url: dataUrl, mimeType: fileType, fileName }];
+        }
+      } else {
+        messageBody = msg.text ?? "";
       }
     } else {
       messageBody = text;
       senderId = topic.replace(/\//g, "-");
     }
 
-    // Build the inbound context using OpenClaw's standard format
     const ctxPayload = runtime.channel.reply.finalizeInboundContext({
       Body: messageBody,
       RawBody: text,
       CommandBody: messageBody,
       CommandAuthorized: true,
       From: `mqtt:${senderId}`,
-      To: `mqtt:${accountId}`,
-      SessionKey: `agent:main:mqtt:${senderId}`, // Using senderId to maintain session per sender within group
+      To: `mqtt:${groupTopic}`,  // group message: use groupTopic as reply target
+      SessionKey: `agent:main:mqtt:${senderId}`,
       AccountId: accountId,
       ChatType: "direct",
-      ConversationLabel: `mqtt:group:${groupTopic}`, // Group-specific conversation label
+      ConversationLabel: `mqtt:group:${groupTopic}`,
       SenderName: senderId,
       SenderId: senderId,
       Provider: "mqtt",
       Surface: "mqtt",
-      MessageSid: `mqtt-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      Timestamp: Date.now(),
+      MessageSid: msg?.id ?? generateMessageId(),
+      Timestamp: msg?.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
+      ...(fileMedia ? { Media: fileMedia } : {}),
     });
 
     // inbound context logging removed
@@ -270,28 +425,32 @@ async function handleGroupMessage(opts: {
       cfg,
       dispatcherOptions: {
         deliver: async (payload: { text?: string; media?: any }, info: { kind: string }) => {
-          if (!payload.text) {
-            log?.debug?.(`MQTT: skipping empty ${info.kind} reply`);
+          if (!payload.text && !payload.media) {
+            log?.debug?.(`MQTT: skipping empty ${info.kind} group reply`);
             return;
           }
 
-          log?.info?.(`MQTT group reply (${info.kind}) [${payload.text.length} chars]`);
-
-           if (mqttClient?.isConnected()) {
+          if (mqttClient?.isConnected()) {
             try {
-              const senderId = mqttClient.getClientId() || "openclaw";
-              const outboundPayload = JSON.stringify({
-                senderId,
+              const myId = mqttClient.getClientId() || "openclaw";
+              const outOpts: Parameters<typeof buildOutboundMessage>[1] = {
                 text: payload.text,
-                kind: info.kind,
-                ts: Date.now(),
-                ...(correlationId ? { correlationId } : {}),
-              });
-              
-              // For group messages, reply to the same group topic
+              };
+
+              if (payload.media) {
+                outOpts.type = 'file';
+                outOpts.fileName = payload.media.fileName;
+                outOpts.fileType = payload.media.mimeType;
+                outOpts.fileData = typeof payload.media.url === 'string' && payload.media.url.startsWith('data:')
+                  ? payload.media.url.split(',')[1]
+                  : payload.media.url;
+              }
+
+              const outboundPayload = JSON.stringify(buildOutboundMessage(myId, outOpts));
+
               const userProperties = {
-                ...mqttClient.getInitialUserProperties(), // Include connection-time user properties
-                reply_to: groupTopic, // Reply to the group topic
+                ...mqttClient.getInitialUserProperties(),
+                reply_to: groupTopic,
               };
               await mqttClient.publish(groupTopic, outboundPayload, qos as 0 | 1 | 2, userProperties);
               log?.info?.(`MQTT: sent group reply to ${groupTopic}`);
@@ -345,11 +504,12 @@ async function handleInboundMessage(opts: {
     const mySenderId = mqttClient?.getClientId() || "openclaw";
 
     // Determine reply topic from user properties (for MQTT v5.0)
-    let replyTopic = "openclaw/outbound"; // Default fallback
+    // replyTopic stores a plain topic path (no "mqtt:" prefix)
+    let replyTopic = "openclaw/outbound"; // Default fallback (plain topic path)
     if (packet && packet.properties && packet.properties.userProperties) {
       const userProps = packet.properties.userProperties;
       if (userProps.reply_to) {
-        replyTopic = userProps.reply_to;
+        replyTopic = userProps.reply_to; // plain topic path from userProperties
       } else {
         log?.warn?.('MQTT v5.0 message missing required "reply_to" property in userProperties, using default reply topic');
       }
@@ -357,7 +517,7 @@ async function handleInboundMessage(opts: {
       log?.warn?.('MQTT message missing properties or userProperties, using default reply topic');
     }
 
-    // Parse JSON if possible to extract structured data
+    // Parse JSON and attempt MqttMessage format
     let parsedPayload: Record<string, unknown> | null = null;
     try {
       parsedPayload = JSON.parse(text);
@@ -365,61 +525,52 @@ async function handleInboundMessage(opts: {
       parsedPayload = null;
     }
 
-    // Extract message body and sender from payload
+    let msg: MqttMessage | null = null;
+    if (parsedPayload && parsedPayload.senderId) {
+      msg = parsedPayload as unknown as MqttMessage;
+    }
+
     let messageBody: string;
     let senderId: string;
-    let correlationId: string | undefined;
+    let messageType: string = "text";
+    let fileMedia: Array<{ url: string; mimeType?: string; fileName?: string }> | undefined;
 
-    if (parsedPayload && typeof parsedPayload === "object") {
-      messageBody =
-        (parsedPayload.message as string) ??
-        (parsedPayload.text as string) ??
-        (parsedPayload.msg as string) ??
-        (parsedPayload.alert as string) ??
-        (parsedPayload.body as string) ??
-        text;
+    if (msg) {
+      senderId = msg.senderId;
 
-      senderId =
-        (parsedPayload.senderId as string) ??
-        (parsedPayload.source as string) ??
-        (parsedPayload.sender as string) ??
-        (parsedPayload.from as string) ??
-        (parsedPayload.service as string) ??
-        topic.replace(/\//g, "-");
-
-      correlationId =
-        (parsedPayload.correlationId as string) ??
-        (parsedPayload.requestId as string) ??
-        undefined;
-
-      // Filter out messages sent by ourselves
       if (senderId === mySenderId) {
         log?.debug?.(`MQTT: ignoring self-sent message from ${senderId}`);
         return;
       }
 
-      // Handle group chat invite messages
-      const messageKind = (parsedPayload?.kind as string) ?? "direct";
-      if (messageKind === "invite" && parsedPayload) {
-        const groupTopic = (parsedPayload.topic as string) ?? topic;
-        
-        // Check if already joined
+      if (msg.targetIds && msg.targetIds.length > 0) {
+        const myClientId = mqttClient?.getClientId() || "openclaw";
+        if (!msg.targetIds.some(id => id.includes(myClientId))) {
+          log?.debug?.(`MQTT: ignoring message with targetIds not meant for client '${myClientId}'`);
+          return;
+        }
+      }
+
+      // Handle group chat invite control messages
+      const messageKind = (parsedPayload?.kind as string);
+      if (messageKind === "invite") {
+        const groupTopic = (parsedPayload?.topic as string) ?? topic;
+
         if (joinedGroups.has(groupTopic)) {
           log?.debug?.(`MQTT: already joined group ${groupTopic}, skipping invite`);
           return;
         }
-        
+
         joinedGroups.add(groupTopic);
         log?.info?.(`MQTT invite: joining group ${groupTopic}`);
 
         if (mqttClient?.isConnected()) {
           try {
-            // Subscribe to the group topic - use handleGroupMessage for group messages
-            mqttClient.subscribe(groupTopic, async (t: string, payload: Buffer, pkt: any) => {
+            mqttClient.subscribe(groupTopic, async (t: string, gPayload: Buffer, pkt: any) => {
               await handleGroupMessage({
                 topic: t,
                 groupTopic: groupTopic,
-                payload,
+                payload: gPayload,
                 packet: pkt,
                 runtime,
                 cfg,
@@ -430,18 +581,11 @@ async function handleInboundMessage(opts: {
             });
             log?.info?.(`MQTT: subscribed to group ${groupTopic}`);
 
-            // Send "invite accepted" message to the group topic
-            const senderId = mqttClient.getClientId() || "openclaw";
-            const acceptPayload = JSON.stringify({
-              senderId,
+            const acceptMsg = buildOutboundMessage(mqttClient.getClientId() || "openclaw", {
               text: "invite accepted",
-              kind: "accept",
-              ts: Date.now(),
             });
-            const userProperties = {
-              ...mqttClient.getInitialUserProperties(),
-            };
-            await mqttClient.publish(groupTopic, acceptPayload, qos as 0 | 1 | 2, userProperties);
+            const acceptPayload = JSON.stringify({ ...acceptMsg, kind: "accept" });
+            await mqttClient.publish(groupTopic, acceptPayload, qos as 0 | 1 | 2, mqttClient.getInitialUserProperties());
             log?.info?.(`MQTT: sent invite accepted to ${groupTopic}`);
           } catch (err) {
             log?.error?.(`MQTT: failed to process invite: ${err}`);
@@ -451,23 +595,21 @@ async function handleInboundMessage(opts: {
         log?.info?.(`MQTT invite processed for ${groupTopic}`);
         return;
       }
-      
-      // Handle group chat dismissed messages
-      if (messageKind === "dismissed" && parsedPayload) {
-        const groupTopic = (parsedPayload.topic as string) ?? topic;
-        
-        // Check if we've joined this group
+
+      // Handle group chat dismissed control messages
+      if (messageKind === "dismissed") {
+        const groupTopic = (parsedPayload?.topic as string) ?? topic;
+
         if (!joinedGroups.has(groupTopic)) {
           log?.debug?.(`MQTT: not member of group ${groupTopic}, skipping dismiss message`);
           return;
         }
-        
+
         joinedGroups.delete(groupTopic);
         log?.info?.(`MQTT: removing from group ${groupTopic} (dismissed by admin)`);
-        
+
         if (mqttClient?.isConnected()) {
           try {
-            // Unsubscribe from the group topic
             mqttClient.unsubscribe(groupTopic, (err) => {
               if (err) {
                 log?.error?.(`MQTT: failed to unsubscribe from group ${groupTopic}: ${err?.message}`);
@@ -479,11 +621,27 @@ async function handleInboundMessage(opts: {
             log?.error?.(`MQTT: failed to process dismiss: ${err}`);
           }
         }
-        
+
         log?.info?.(`MQTT dismiss processed for ${groupTopic}`);
         return;
       }
+
+      // Regular message: extract by type
+      messageType = msg.type ?? "text";
+      if (messageType === "file") {
+        const fileName = msg.fileName ?? "unknown";
+        const fileType = msg.fileType ?? "application/octet-stream";
+        messageBody = msg.text ?? `[File: ${fileName} (${fileType})]`;
+
+        if (msg.fileData) {
+          const dataUrl = `data:${fileType};base64,${msg.fileData}`;
+          fileMedia = [{ url: dataUrl, mimeType: fileType, fileName }];
+        }
+      } else {
+        messageBody = msg.text ?? "";
+      }
     } else {
+      // Legacy plain text fallback
       messageBody = text;
       senderId = topic.replace(/\//g, "-");
     }
@@ -495,7 +653,7 @@ async function handleInboundMessage(opts: {
       CommandBody: messageBody,
       CommandAuthorized: true,
       From: `mqtt:${senderId}`,
-      To: `mqtt:${accountId}`,
+      To: `mqtt:${replyTopic}`,  // 使用 replyTopic，框架会把它作为 to 传给 sendMedia
       SessionKey: `agent:main:mqtt:${senderId}`,
       AccountId: accountId,
       ChatType: "direct",
@@ -504,40 +662,46 @@ async function handleInboundMessage(opts: {
       SenderId: senderId,
       Provider: "mqtt",
       Surface: "mqtt",
-      MessageSid: `mqtt-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      Timestamp: Date.now(),
+      MessageSid: msg?.id ?? generateMessageId(),
+      Timestamp: msg?.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
+      ...(fileMedia ? { Media: fileMedia } : {}),
     });
-
-    // inbound context logging removed
 
     // Dispatch through OpenClaw's reply system and publish replies
     await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
-        deliver: async (payload: { text?: string; media?: any }, info: { kind: string }) => {
-          if (!payload.text) {
+         deliver: async (payload: { text?: string; media?: any }, info: { kind: string }) => {
+          if (!payload.text && !payload.media) {
             log?.debug?.(`MQTT: skipping empty ${info.kind} reply`);
             return;
           }
 
-          log?.info?.(`MQTT reply (${info.kind}) [${payload.text.length} chars]`);
-
-           if (mqttClient?.isConnected()) {
+          if (mqttClient?.isConnected()) {
             try {
-              const senderId = mqttClient.getClientId() || "openclaw";
-              const outboundPayload = JSON.stringify({
-                senderId,
+              const myId = mqttClient.getClientId() || "openclaw";
+              const outOpts: Parameters<typeof buildOutboundMessage>[1] = {
                 text: payload.text,
-                kind: info.kind,
-                ts: Date.now(),
-                ...(correlationId ? { correlationId } : {}),
-              });
-              
-              // Combine initial user properties with reply_to property
+              };
+
+              if (payload.media) {
+                outOpts.type = 'file';
+                const { fileData, fileName: extractedName, fileType } = extractMediaData({
+                  url: payload.media.url,
+                  fileName: payload.media.fileName,
+                  mimeType: payload.media.mimeType,
+                });
+                outOpts.fileName = extractedName;
+                outOpts.fileType = fileType;
+                outOpts.fileData = fileData;
+              }
+
+              const outboundPayload = JSON.stringify(buildOutboundMessage(myId, outOpts));
+
               const userProperties = {
-                ...mqttClient.getInitialUserProperties(), // Include connection-time user properties
-                reply_to: replyTopic, // Add reply_to property
+                ...mqttClient.getInitialUserProperties(),
+                reply_to: replyTopic,
               };
               await mqttClient.publish(replyTopic, outboundPayload, qos as 0 | 1 | 2, userProperties);
               log?.info?.(`MQTT: sent reply to ${replyTopic}`);
@@ -561,8 +725,11 @@ async function handleInboundMessage(opts: {
     });
 
     // dispatch complete
-
     log?.info?.(`MQTT message processed from ${senderId}`);
+
+    // Store replyTopic for sendMedia to use later
+    replyTopicMap.set(senderId, replyTopic);
+    log?.info?.(`MQTT: stored replyTopic ${replyTopic} for sender ${senderId}`);
   } catch (err) {
     log?.error?.(`Failed to process MQTT message: ${err}`);
   }
