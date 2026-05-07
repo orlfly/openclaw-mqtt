@@ -3,6 +3,98 @@
   "name": "MQTT",
   "description": "Bidirectional MQTT channel for IoT and home automation integration",
   "channels": ["mqtt"],
+  "channelConfigs": {
+    "mqtt": {
+      "schema": {
+        "type": "object",
+        "required": ["brokerUrl"],
+        "properties": {
+          "brokerUrl": {
+            "type": "string",
+            "format": "uri",
+            "title": "Broker URL",
+            "description": "MQTT broker URL (e.g., mqtt://localhost:1883)"
+          },
+          "username": {
+            "type": "string",
+            "title": "Username",
+            "description": "Broker username (optional)"
+          },
+          "password": {
+            "type": "string",
+            "title": "Password",
+            "description": "Broker password (optional, recommend using MQTT_PASSWORD env var)"
+          },
+          "clientId": {
+            "type": "string",
+            "title": "Client ID",
+            "description": "MQTT client ID (auto-generated if not specified)"
+          },
+          "protocolVersion": {
+            "type": "integer",
+            "const": 5,
+            "default": 5,
+            "title": "Protocol Version",
+            "description": "MQTT protocol version (only v5.0 supported)"
+          },
+          "userProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "User Properties",
+            "description": "User properties to send with connection"
+          },
+          "topics": {
+            "type": "object",
+            "title": "Topics",
+            "properties": {
+              "inbound": {
+                "type": "string",
+                "default": "openclaw/inbound",
+                "title": "Inbound Topic",
+                "description": "Topic to subscribe for incoming messages"
+              }
+            }
+          },
+          "qos": {
+            "type": "integer",
+            "enum": [0, 1, 2],
+            "default": 1,
+            "title": "QoS Level",
+            "description": "Quality of Service level (0, 1, or 2)"
+          },
+          "tls": {
+            "type": "object",
+            "title": "TLS Settings",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": false,
+                "title": "Enable TLS",
+                "description": "Enable TLS/SSL connection"
+              },
+              "rejectUnauthorized": {
+                "type": "boolean",
+                "default": true,
+                "title": "Reject Unauthorized",
+                "description": "Reject unauthorized certificates"
+              },
+              "ca": {
+                "type": "string",
+                "title": "CA Certificate Path",
+                "description": "Path to CA certificate file"
+              }
+            }
+          }
+        }
+      },
+      "ui": {
+        "order": ["brokerUrl", "username", "password", "clientId", "protocolVersion", "qos", "topics", "userProperties", "tls"],
+        "password": ["password"]
+      }
+    }
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
