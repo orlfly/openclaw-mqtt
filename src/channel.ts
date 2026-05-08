@@ -85,11 +85,28 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
 
     resolveTarget: (params: any) => {
       const to = params?.to ?? params;
+
       if (!to?.trim()) {
         return { ok: false, error: new Error("MQTT target required") };
       }
-      // Accept any non-empty target; sendMedia will resolve via replyTopicMap if needed
-      return { ok: true, to: to.trim() };
+
+      // Normalize: remove mqtt: prefix for processing
+      const trimmed = to.trim();
+      const withoutPrefix = trimmed.startsWith("mqtt:") ? trimmed.slice(5) : trimmed;
+
+      // If it looks like a senderId (no / character), construct full topic
+      if (!withoutPrefix.includes("/")) {
+        // Try replyTopicMap first
+        const storedTopic = replyTopicMap.get(withoutPrefix);
+        if (storedTopic) {
+          return { ok: true, to: `mqtt:${storedTopic}` };
+        }
+        // Fallback: construct topic as senderId/inbound
+        return { ok: true, to: `mqtt:${withoutPrefix}/inbound` };
+      }
+
+      // Already has /, return with mqtt: prefix
+      return { ok: true, to: `mqtt:${withoutPrefix}` };
     },
 
     async sendText(params: any) {
@@ -116,30 +133,35 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
     },
 
     async sendMedia(params: any) {
-      const { cfg, to, text, mediaUrl, filePath, media, signal } = params;
+      // Framework may pass target instead of to
+      const { cfg, to, target, text, mediaUrl, filePath, media, signal } = params;
+      const effectiveTo = to || target;
+
       if (signal?.aborted) return { ok: false, error: "Aborted" };
 
       const mqtt = cfg?.channels?.mqtt;
       if (!mqtt?.brokerUrl) return { ok: false, error: "MQTT not configured" };
       if (!mqttClient || !mqttClient.isConnected()) return { ok: false, error: "MQTT not connected" };
+
       // Support both 'media' (used by framework) and 'mediaUrl'/'filePath' (standard)
       const resolvedPath = media || filePath || mediaUrl;
       if (!resolvedPath) return { ok: false, error: "Media URL or file path is required" };
 
       try {
         // Support both mediaUrl and filePath (OpenClaw uses filePath)
-        const url = mediaUrl || filePath;
+        const url = media || filePath || mediaUrl;
         const { fileData, fileName: extractedName, fileType, sizeBytes } = extractMediaData({ url, fileName: text });
+
         if (sizeBytes > MAX_FILE_SIZE_BYTES) {
           return { ok: false, error: `File size exceeds limit. Max: ${MAX_FILE_SIZE_BYTES / (1024 * 1024)}MB, Got: ${(sizeBytes / (1024 * 1024)).toFixed(2)}MB` };
         }
 
-        // Determine topic: use replyTopicMap if to is the default "mqtt:default"
-        let rawTopic = to ?? "openclaw/outbound";
+        // Determine topic: use replyTopicMap to find the real reply topic
+        let rawTopic = effectiveTo ?? to ?? "openclaw/outbound";
 
-        if (rawTopic === "mqtt:default" || rawTopic === "default") {
-          // Try to find the real reply topic from the map using senderId extracted from 'to'
-          const mapKey = to.startsWith("mqtt:") ? to.slice(5) : to;
+        // If rawTopic looks like a senderId (no / character), look up replyTopicMap
+        if (!rawTopic.includes("/")) {
+          const mapKey = rawTopic.startsWith("mqtt:") ? rawTopic.slice(5) : rawTopic;
           const storedTopic = replyTopicMap.get(mapKey);
           if (storedTopic) {
             rawTopic = storedTopic;
@@ -156,6 +178,7 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
           fileType,
           fileData,
         });
+
         const outboundPayload = JSON.stringify(outboundMsg);
         const userProperties = mqttClient.getInitialUserProperties ? mqttClient.getInitialUserProperties() : undefined;
         await mqttClient.publish(topic, outboundPayload, mqtt.qos, userProperties);
@@ -646,6 +669,9 @@ async function handleInboundMessage(opts: {
       senderId = topic.replace(/\//g, "-");
     }
 
+    // Store replyTopic BEFORE dispatchReply so resolveTarget can find it
+    replyTopicMap.set(senderId, replyTopic);
+
     // Build the inbound context using OpenClaw's standard format
     const ctxPayload = runtime.channel.reply.finalizeInboundContext({
       Body: messageBody,
@@ -726,9 +752,6 @@ async function handleInboundMessage(opts: {
 
     // dispatch complete
     log?.info?.(`MQTT message processed from ${senderId}`);
-
-    // Store replyTopic for sendMedia to use later
-    replyTopicMap.set(senderId, replyTopic);
     log?.info?.(`MQTT: stored replyTopic ${replyTopic} for sender ${senderId}`);
   } catch (err) {
     log?.error?.(`Failed to process MQTT message: ${err}`);
