@@ -549,8 +549,89 @@ async function handleInboundMessage(opts: {
     }
 
     let msg: MqttMessage | null = null;
-    if (parsedPayload && parsedPayload.senderId) {
-      msg = parsedPayload as unknown as MqttMessage;
+    let messageKind: string | undefined;
+    if (parsedPayload) {
+      messageKind = parsedPayload.kind as string;
+      if (parsedPayload.senderId) {
+        msg = parsedPayload as unknown as MqttMessage;
+      }
+    }
+
+    log?.info?.(`MQTT: parsed payload, msg=${msg !== null}, senderId=${parsedPayload?.senderId ?? "(none)"}, kind=${messageKind ?? "(none)"}`);
+
+    // Handle control messages regardless of senderId presence
+    if (messageKind === "invite") {
+      const groupTopic = (parsedPayload?.topic as string) ?? topic;
+      log?.info?.(`MQTT: invite message for group ${groupTopic}`);
+
+      if (joinedGroups.has(groupTopic)) {
+        log?.info?.(`MQTT: already joined group ${groupTopic}, skipping invite`);
+        return;
+      }
+
+      joinedGroups.add(groupTopic);
+      log?.info?.(`MQTT invite: joining group ${groupTopic}`);
+
+      if (mqttClient?.isConnected()) {
+        try {
+          mqttClient.subscribe(groupTopic, async (t: string, gPayload: Buffer, pkt: any) => {
+            await handleGroupMessage({
+              topic: t,
+              groupTopic: groupTopic,
+              payload: gPayload,
+              packet: pkt,
+              runtime,
+              cfg,
+              accountId,
+              log,
+              qos: qos,
+            });
+          });
+          log?.info?.(`MQTT: subscribed to group ${groupTopic}`);
+
+          const acceptMsg = buildOutboundMessage(mqttClient.getClientId() || "openclaw", {
+            text: "invite accepted",
+          });
+          const acceptPayload = JSON.stringify({ ...acceptMsg, kind: "accept" });
+          await mqttClient.publish(groupTopic, acceptPayload, qos as 0 | 1 | 2, mqttClient.getInitialUserProperties());
+          log?.info?.(`MQTT: sent invite accepted to ${groupTopic}`);
+        } catch (err) {
+          log?.error?.(`MQTT: failed to process invite: ${err}`);
+        }
+      }
+
+      log?.info?.(`MQTT invite processed for ${groupTopic}`);
+      return;
+    }
+
+    if (messageKind === "dismissed") {
+      log?.info?.(`MQTT: received dismiss message, raw payload: ${text}`);
+      log?.info?.(`MQTT: parsedPayload: ${JSON.stringify(parsedPayload)}`);
+      log?.info?.(`MQTT: messageKind=${messageKind}, topic=${topic}`);
+
+      const groupTopic = (parsedPayload?.topic as string) ?? topic;
+      log?.info?.(`MQTT: resolved groupTopic=${groupTopic}, mqttClient connected=${mqttClient?.isConnected()}`);
+
+      if (mqttClient?.isConnected()) {
+        log?.info?.(`MQTT: attempting to unsubscribe from ${groupTopic}`);
+        try {
+          mqttClient.unsubscribe(groupTopic, (err) => {
+            if (err) {
+              log?.error?.(`MQTT: failed to unsubscribe from group ${groupTopic}: ${err?.message}`);
+            } else {
+              log?.info?.(`MQTT: unsubscribed from group ${groupTopic}`);
+            }
+          });
+          log?.info?.(`MQTT: unsubscribe call completed for ${groupTopic}`);
+        } catch (err) {
+          log?.error?.(`MQTT: failed to process dismiss: ${err}`);
+        }
+      } else {
+        log?.info?.(`MQTT: not connected, skipping unsubscribe for ${groupTopic}`);
+      }
+
+      log?.info?.(`MQTT dismiss processed for ${groupTopic}`);
+      return;
     }
 
     let messageBody: string;
@@ -562,91 +643,16 @@ async function handleInboundMessage(opts: {
       senderId = msg.senderId;
 
       if (senderId === mySenderId) {
-        log?.debug?.(`MQTT: ignoring self-sent message from ${senderId}`);
+        log?.info?.(`MQTT: ignoring self-sent message from ${senderId}`);
         return;
       }
 
       if (msg.targetIds && msg.targetIds.length > 0) {
         const myClientId = mqttClient?.getClientId() || "openclaw";
         if (!msg.targetIds.some(id => id.includes(myClientId))) {
-          log?.debug?.(`MQTT: ignoring message with targetIds not meant for client '${myClientId}'`);
+          log?.info?.(`MQTT: ignoring message with targetIds not meant for client '${myClientId}'`);
           return;
         }
-      }
-
-      // Handle group chat invite control messages
-      const messageKind = (parsedPayload?.kind as string);
-      if (messageKind === "invite") {
-        const groupTopic = (parsedPayload?.topic as string) ?? topic;
-
-        if (joinedGroups.has(groupTopic)) {
-          log?.debug?.(`MQTT: already joined group ${groupTopic}, skipping invite`);
-          return;
-        }
-
-        joinedGroups.add(groupTopic);
-        log?.info?.(`MQTT invite: joining group ${groupTopic}`);
-
-        if (mqttClient?.isConnected()) {
-          try {
-            mqttClient.subscribe(groupTopic, async (t: string, gPayload: Buffer, pkt: any) => {
-              await handleGroupMessage({
-                topic: t,
-                groupTopic: groupTopic,
-                payload: gPayload,
-                packet: pkt,
-                runtime,
-                cfg,
-                accountId,
-                log,
-                qos: qos,
-              });
-            });
-            log?.info?.(`MQTT: subscribed to group ${groupTopic}`);
-
-            const acceptMsg = buildOutboundMessage(mqttClient.getClientId() || "openclaw", {
-              text: "invite accepted",
-            });
-            const acceptPayload = JSON.stringify({ ...acceptMsg, kind: "accept" });
-            await mqttClient.publish(groupTopic, acceptPayload, qos as 0 | 1 | 2, mqttClient.getInitialUserProperties());
-            log?.info?.(`MQTT: sent invite accepted to ${groupTopic}`);
-          } catch (err) {
-            log?.error?.(`MQTT: failed to process invite: ${err}`);
-          }
-        }
-
-        log?.info?.(`MQTT invite processed for ${groupTopic}`);
-        return;
-      }
-
-      // Handle group chat dismissed control messages
-      if (messageKind === "dismissed") {
-        const groupTopic = (parsedPayload?.topic as string) ?? topic;
-
-        if (!joinedGroups.has(groupTopic)) {
-          log?.debug?.(`MQTT: not member of group ${groupTopic}, skipping dismiss message`);
-          return;
-        }
-
-        joinedGroups.delete(groupTopic);
-        log?.info?.(`MQTT: removing from group ${groupTopic} (dismissed by admin)`);
-
-        if (mqttClient?.isConnected()) {
-          try {
-            mqttClient.unsubscribe(groupTopic, (err) => {
-              if (err) {
-                log?.error?.(`MQTT: failed to unsubscribe from group ${groupTopic}: ${err?.message}`);
-              } else {
-                log?.info?.(`MQTT: unsubscribed from group ${groupTopic}`);
-              }
-            });
-          } catch (err) {
-            log?.error?.(`MQTT: failed to process dismiss: ${err}`);
-          }
-        }
-
-        log?.info?.(`MQTT dismiss processed for ${groupTopic}`);
-        return;
       }
 
       // Regular message: extract by type
