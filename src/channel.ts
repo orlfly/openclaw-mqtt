@@ -9,9 +9,6 @@ import * as path from "path";
 // Global client instance (one per gateway lifecycle)
 let mqttClient: MqttClientManager | null = null;
 
-// Track joined group topics for group chat
-const joinedGroups: Set<string> = new Set();
-
 // Store reply topics for active conversations: senderId -> replyTopic
 const replyTopicMap: Map<string, string> = new Map();
 
@@ -564,12 +561,6 @@ async function handleInboundMessage(opts: {
       const groupTopic = (parsedPayload?.topic as string) ?? topic;
       log?.info?.(`MQTT: invite message for group ${groupTopic}`);
 
-      if (joinedGroups.has(groupTopic)) {
-        log?.info?.(`MQTT: already joined group ${groupTopic}, skipping invite`);
-        return;
-      }
-
-      joinedGroups.add(groupTopic);
       log?.info?.(`MQTT invite: joining group ${groupTopic}`);
 
       if (mqttClient?.isConnected()) {
