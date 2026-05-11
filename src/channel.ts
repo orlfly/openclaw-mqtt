@@ -382,6 +382,7 @@ async function handleGroupMessage(opts: {
     let senderId: string;
     let messageType: string = "text";
     let fileMedia: Array<{ url: string; mimeType?: string; fileName?: string }> | undefined;
+    let shouldReply = true;
 
     if (msg) {
       senderId = msg.senderId;
@@ -394,8 +395,8 @@ async function handleGroupMessage(opts: {
       if (msg.targetIds && msg.targetIds.length > 0) {
         const myClientId = mqttClient?.getClientId() || "openclaw";
         if (!msg.targetIds.some(id => id.includes(myClientId))) {
-          log?.debug?.(`MQTT: ignoring message with targetIds not meant for client '${myClientId}'`);
-          return;
+          log?.info?.(`MQTT: targetIds not meant for client '${myClientId}', will record context without reply`);
+          shouldReply = false;
         }
       }
 
@@ -444,8 +445,12 @@ async function handleGroupMessage(opts: {
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
-        deliver: async (payload: { text?: string; media?: any }, info: { kind: string }) => {
-          if (!payload.text && !payload.media) {
+          deliver: async (payload: { text?: string; media?: any }, info: { kind: string }) => {
+           if (!shouldReply) {
+             log?.info?.(`MQTT: skipping reply for non-targeted message (context only)`);
+             return;
+           }
+           if (!payload.text && !payload.media) {
             log?.debug?.(`MQTT: skipping empty ${info.kind} group reply`);
             return;
           }
@@ -629,6 +634,7 @@ async function handleInboundMessage(opts: {
     let senderId: string;
     let messageType: string = "text";
     let fileMedia: Array<{ url: string; mimeType?: string; fileName?: string }> | undefined;
+    let shouldReply = true;
 
     if (msg) {
       senderId = msg.senderId;
@@ -641,8 +647,8 @@ async function handleInboundMessage(opts: {
       if (msg.targetIds && msg.targetIds.length > 0) {
         const myClientId = mqttClient?.getClientId() || "openclaw";
         if (!msg.targetIds.some(id => id.includes(myClientId))) {
-          log?.info?.(`MQTT: ignoring message with targetIds not meant for client '${myClientId}'`);
-          return;
+          log?.info?.(`MQTT: targetIds not meant for client '${myClientId}', will record context without reply`);
+          shouldReply = false;
         }
       }
 
@@ -695,7 +701,11 @@ async function handleInboundMessage(opts: {
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
-         deliver: async (payload: { text?: string; media?: any }, info: { kind: string }) => {
+        deliver: async (payload: { text?: string; media?: any }, info: { kind: string }) => {
+           if (!shouldReply) {
+             log?.info?.(`MQTT: skipping reply for non-targeted group message (context only)`);
+             return;
+           }
           if (!payload.text && !payload.media) {
             log?.debug?.(`MQTT: skipping empty ${info.kind} reply`);
             return;

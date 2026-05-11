@@ -373,7 +373,7 @@ describe("mqttPlugin", () => {
       } as any);
 
       expect(result.ok).toBe(false);
-      expect(result.error).toBe("Media URL is required");
+      expect(result.error).toBe("Media URL or file path is required");
 
       controller.abort();
       await startPromise;
