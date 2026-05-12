@@ -1,0 +1,103 @@
+{
+  "gateway": {
+    "mode": "local",
+    "port": 18789,
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "0a32d35138ed89ac512537b8fe36d0ac5dde14d02ab0eaa1"
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "/home/node/.openclaw/workspace",
+      "model": {
+        "primary": "tencent/glm-5.1"
+      },
+      "models": {
+        "tencent/glm-5.1": {
+          "alias": "glm-5.1"
+        }
+      },
+      "compaction": {
+        "mode": "safeguard"
+      }
+    }
+  },
+  "wizard": {
+    "lastRunAt": "2026-04-27T06:42:16.382Z",
+    "lastRunVersion": "2026.4.22",
+    "lastRunCommand": "configure",
+    "lastRunMode": "local"
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "tencent": {
+        "baseUrl": "https://api.lkeap.cloud.tencent.com/plan/v3",
+        "api": "openai-completions",
+        "apiKey": "sk-tp-ooTUIoXIbUY49CDb6Ilu5N72dH7rbXAmGIFJ82AkOWmJAtma",
+        "models": [
+          {
+            "id": "glm-5.1",
+            "name": "glm-5.1 (Custom Provider)",
+            "contextWindow": 1600000,
+            "maxTokens": 40960,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "reasoning": false
+          }
+        ]
+      }
+    }
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.4.22",
+    "lastTouchedAt": "2026-05-07T08:38:33.742Z"
+  },
+  "plugins": {
+    "entries": {
+      "mqtt": {
+        "enabled": true
+      }
+    },
+    "installs": {
+      "mqtt": {
+        "source": "path",
+        "sourcePath": "/opt/workspace/openclaw-mqtt",
+        "installPath": "/home/cc/.openclaw/extensions/mqtt",
+        "version": "0.1.17",
+        "installedAt": "2026-05-07T08:38:33.265Z"
+      }
+    }
+  },
+  "channels": {
+    "mqtt": {
+      "brokerUrl": "mqtt://192.168.106.121:1883",
+      "clientId": "openclaw-test",
+      "protocolVersion": 5,
+      "qos": 1,
+      "topics": {
+        "inbound": "openclaw-test/inbound"
+      },
+      "username": "openclaw",
+      "userProperties": {
+        "description": "高级测试人员，能完成需求文档的理解并基于此编写各种测试用例。",
+        "emoji": "",
+	"name": "测试管理"
+      },
+      "password": "kingsware@123"
+    }
+  }
+}

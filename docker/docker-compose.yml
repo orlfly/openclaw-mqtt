@@ -1,0 +1,29 @@
+services:
+  openclaw:
+    image: alpine/openclaw:latest
+    container_name: openclaw-mqtt
+    restart: unless-stopped
+    ports:
+      - "19789:18789"
+    volumes:
+      # Persist OpenClaw state (sessions, credentials, extensions) across restarts
+      - ./data:/root/.openclaw
+      # Mount project source so plugin can be installed from local path
+      - /home/cc/agents/openclaw-mqtt:/root/.openclaw/openclaw-mqtt:ro
+    user: "0:0"
+    environment:
+      - TZ=Asia/Shanghai
+      - OPENCLAW_SKIP_ONBOARDING=1
+    command: >
+      sh -c "
+        echo '=== OpenClaw MQTT Plugin Setup ===';
+        if [ ! -d \"/root/.openclaw/extensions/mqtt\" ]; then
+          echo 'Installing MQTT plugin from source...';
+          node /app/openclaw.mjs plugins install /root/.openclaw/openclaw-mqtt 2>&1 || echo 'Plugin install skipped (already installed or not needed)';
+        else
+          echo 'MQTT plugin already installed';
+        fi;
+        node /app/openclaw.mjs doctor --fix
+        echo 'Starting OpenClaw gateway...';
+        exec node /app/openclaw.mjs gateway
+      "
