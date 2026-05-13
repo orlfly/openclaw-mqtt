@@ -805,4 +805,54 @@ async function handleInboundMessage(opts: {
   }
 }
 
+/**
+ * MQTT Send Tool - allows the Agent to send messages to MQTT topics
+ * with optional targetIds for group member targeting.
+ */
+export function createMqttSendTool() {
+  return {
+    name: "mqtt_send",
+    label: "MQTT Send",
+    description: "Send a message to an MQTT topic (e.g., a group topic), with optional targetIds to direct the message to specific group members.",
+    parameters: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Message text content" },
+        topic: { type: "string", description: "MQTT topic to publish to" },
+        targetIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Target specific group member IDs (omit to broadcast to all group members)",
+        },
+        qos: {
+          type: "integer",
+          enum: [0, 1, 2],
+          default: 1,
+          description: "MQTT QoS level (0, 1, or 2)",
+        },
+      },
+      required: ["text", "topic"],
+    },
+    execute: async (_toolCallId: string, args: any) => {
+      if (!mqttClient?.isConnected()) {
+        return { ok: false, error: "MQTT not connected" };
+      }
+
+      const myId = mqttClient.getClientId() || "openclaw";
+      const targetIds: string[] | undefined = args.targetIds?.length > 0 ? args.targetIds : undefined;
+
+      const outOpts: Parameters<typeof buildOutboundMessage>[1] = {
+        text: args.text,
+        ...(targetIds ? { targetIds } : {}),
+      };
+
+      const payload = JSON.stringify(buildOutboundMessage(myId, outOpts));
+      const qos = (args.qos ?? 1) as 0 | 1 | 2;
+
+      await mqttClient.publish(args.topic, payload, qos, mqttClient.getInitialUserProperties());
+      return { ok: true, topic: args.topic, targetIds };
+    },
+  };
+}
+
 

@@ -1,7 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
-import { mqttPlugin } from "./src/channel.js";
+import { mqttPlugin, createMqttSendTool } from "./src/channel.js";
 import { setMqttRuntime } from "./src/runtime.js";
 
 const plugin = {
@@ -12,6 +12,7 @@ const plugin = {
   register(api: OpenClawPluginApi) {
     setMqttRuntime(api.runtime);
     api.registerChannel({ plugin: mqttPlugin });
+    api.registerTool(createMqttSendTool());
   },
 };
 
