@@ -12,6 +12,9 @@ let mqttClient: MqttClientManager | null = null;
 // Store reply topics for active conversations: senderId -> replyTopic
 const replyTopicMap: Map<string, string> = new Map();
 
+// Track group members for session cleanup on dismiss: groupTopic -> Set<senderId>
+const groupMembersMap: Map<string, Set<string>> = new Map();
+
 // File size limit: 10MB
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 
@@ -380,21 +383,31 @@ async function handleGroupMessage(opts: {
 
     let messageBody: string;
     let senderId: string;
+    let senderName: string;
     let messageType: string = "text";
     let fileMedia: Array<{ url: string; mimeType?: string; fileName?: string }> | undefined;
     let shouldReply = true;
+    let msgHadTargetIds = false;
 
     if (msg) {
       senderId = msg.senderId;
+      senderName = packet?.properties?.userProperties?.name as string || senderId;
 
       if (senderId === mySenderId) {
         log?.debug?.(`MQTT: ignoring self-sent message from ${senderId}`);
         return;
       }
 
-      if (msg.targetIds && msg.targetIds.length > 0) {
+      msgHadTargetIds = !!(msg.targetIds && msg.targetIds.length > 0);
+      // Track group membership for session cleanup
+      if (!groupMembersMap.has(groupTopic)) {
+        groupMembersMap.set(groupTopic, new Set());
+      }
+      groupMembersMap.get(groupTopic)!.add(senderId);
+      log?.info?.(`MQTT group msg: senderId=${senderId}, msgHadTargetIds=${msgHadTargetIds}, targetIds=${JSON.stringify(msg.targetIds)}`);
+      if (msgHadTargetIds) {
         const myClientId = mqttClient?.getClientId() || "openclaw";
-        if (!msg.targetIds.some(id => id.includes(myClientId))) {
+        if (!msg.targetIds!.some(id => id.includes(myClientId))) {
           log?.info?.(`MQTT: targetIds not meant for client '${myClientId}', will record context without reply`);
           shouldReply = false;
         }
@@ -416,6 +429,7 @@ async function handleGroupMessage(opts: {
     } else {
       messageBody = text;
       senderId = topic.replace(/\//g, "-");
+      senderName = senderId;
     }
 
     const ctxPayload = runtime.channel.reply.finalizeInboundContext({
@@ -462,6 +476,12 @@ async function handleGroupMessage(opts: {
                 text: payload.text,
               };
 
+              if (msgHadTargetIds) {
+                outOpts.text = `@${senderName} ${payload.text ?? ""}`.trim();
+                outOpts.targetIds = [senderId];
+                log?.info?.(`MQTT group reply: prepended @${senderName}, targetIds=[${senderId}] because original msg had targetIds`);
+              }
+
               if (payload.media) {
                 outOpts.type = 'file';
                 outOpts.fileName = payload.media.fileName;
@@ -472,6 +492,7 @@ async function handleGroupMessage(opts: {
               }
 
               const outboundPayload = JSON.stringify(buildOutboundMessage(myId, outOpts));
+              log?.info?.(`MQTT group reply payload: ${outboundPayload}`);
 
               const userProperties = {
                 ...mqttClient.getInitialUserProperties(),
@@ -611,6 +632,13 @@ async function handleInboundMessage(opts: {
       if (mqttClient?.isConnected()) {
         log?.info?.(`MQTT: attempting to unsubscribe from ${groupTopic}`);
         try {
+          // Notify group before leaving
+          const leaveMsg = buildOutboundMessage(mqttClient.getClientId() || "openclaw", {
+            text: "bot left the group",
+          });
+          const leavePayload = JSON.stringify({ ...leaveMsg, kind: "bye" });
+          await mqttClient.publish(groupTopic, leavePayload, qos as 0 | 1 | 2, mqttClient.getInitialUserProperties());
+
           mqttClient.unsubscribe(groupTopic, (err) => {
             if (err) {
               log?.error?.(`MQTT: failed to unsubscribe from group ${groupTopic}: ${err?.message}`);
@@ -627,6 +655,18 @@ async function handleInboundMessage(opts: {
       }
 
       log?.info?.(`MQTT dismiss processed for ${groupTopic}`);
+
+      // Clean up local state for this group
+      const members = groupMembersMap.get(groupTopic);
+      if (members) {
+        log?.info?.(`MQTT: cleaning up ${members.size} group member local state for ${groupTopic}`);
+        for (const memberId of members) {
+          replyTopicMap.delete(memberId);
+        }
+        groupMembersMap.delete(groupTopic);
+      }
+
+      log?.info?.(`MQTT: group cleanup complete for ${groupTopic}`);
       return;
     }
 
