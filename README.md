@@ -4,14 +4,17 @@
 [![npm](https://img.shields.io/npm/v/@turquoisebay/mqtt)](https://www.npmjs.com/package/@turquoisebay/mqtt)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-MQTT channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) — bidirectional messaging via MQTT brokers.
+MQTT channel plugin for [OpenClaw](https://github.com/openclaw/openclaw) — bidirectional messaging via MQTT brokers with support for private chat, group chat, and file sharing.
 
 ## Features
 
+- 💬 **Private & Group Chat** — direct messages and group conversations via MQTT topics
+- 📁 **File Sharing** — send and receive files via base64-encoded MQTT messages (up to 10MB)
 - 🔌 **Bidirectional messaging** — subscribe and publish to MQTT topics
-- 🔁 **Robust reconnection** — recovers from broker restarts and cold starts
+- 🔁 **Robust reconnection** — exponential backoff with jitter, recovers from broker restarts
 - 🔒 **TLS support** — secure connections to cloud brokers
 - ⚡ **QoS levels** — configurable delivery guarantees (0, 1, 2)
+- 🎯 **Targeted Messaging** — @-mention specific clients via `targetIds` array
 
 ## Installation
 
@@ -35,21 +38,21 @@ Add to `~/.openclaw/openclaw.json`:
   channels: {
     mqtt: {
       brokerUrl: "mqtt://localhost:1883",
-      // Optional auth
+      // Authentication
       username: "openclaw",
       password: "secret",
-      // Client ID (used as senderId in messages)
-      clientId: "openclaw-gateway",
-      // MQTT v5.0 specific options
-      protocolVersion: 5,              // Only supports MQTT 5.0
-      userProperties: {                // Custom properties sent with connection
-        "name": "OpenClaw Gateway",
-        "description": "MQTT channel gateway",
-        "emoji": "🤖"
+      // Client ID (used as senderId in all messages)
+      clientId: "openclaw-agent",
+      // MQTT v5.0 is required (user properties for reply_to)
+      protocolVersion: 5,
+      // User properties sent with every message
+      userProperties: {
+        name: "OpenClaw Agent",
+        emoji: "🤖"
       },
       // Topics
       topics: {
-        inbound: "openclaw/inbound",   // Subscribe to this
+        inbound: "openclaw/inbound",   // Topic subscribed for incoming messages
       },
       // Quality of Service (0=fire-and-forget, 1=at-least-once, 2=exactly-once)
       qos: 1
@@ -78,60 +81,229 @@ Sensitive configuration can be set via environment variables:
 
 Environment variables take precedence over values in openclaw.json.
 
-## Usage
+## Message Protocol
 
-### Sessions & correlation IDs (important)
+### Message Format (JSON)
 
-- **Sessions are keyed by `senderId`** → OpenClaw uses `mqtt:{senderId}` as the SessionKey, so memory and conversation history are grouped by sender.
-- **`correlationId` is request‑level only** → if you include it in inbound JSON, it's echoed back in the outbound reply for client-side matching. It does **not** create a new session or change memory.
-
-If you want separate conversations, use distinct `senderId`s.
-
-### Receiving messages (inbound)
-
-Messages published to your `inbound` topic will be processed by OpenClaw.
-With MQTT v5.0, you must include a `reply_to` property in the userProperties to specify the reply topic.
-You can send either plain text or JSON (recommended):
-
-```bash
-# Plain text with user properties (using mosquitto_pub with MQTT v5.0)
-mosquitto_pub --property "user-property" "reply_to=openclaw/reply/pg-cli" -t "openclaw/inbound" -m "Alert: Service down on playground"
-
-# JSON (recommended) with user properties
-mosquitto_pub --property "user-property" "reply_to=openclaw/reply/pg-cli" -t "openclaw/inbound" -m '{"senderId":"pg-cli","text":"hello","correlationId":"abc-123"}'
-```
-
-### Message Reply Mechanism
-
-The MQTT plugin uses a dynamic reply mechanism based on MQTT v5.0 userProperties:
-
-- **Reply Topic Selection**: The topic for sending replies is determined by the `reply_to` userProperty in the incoming message. 
-- **Fallback Behavior**: If no `reply_to` property is provided, replies will go to the default `openclaw/outbound` topic.
-- **Message Format**: All agent replies are published as JSON with the following structure:
+All messages are JSON with the following structure:
 
 ```json
-{"senderId":"openclaw-gateway","text":"...","kind":"final","ts":1700000000000}
+{
+  "id": "mqtt-1712345678901-abc123",
+  "senderId": "client-device-1",
+  "text": "message content",
+  "timestamp": "2026-05-15T12:00:00.000Z",
+  "type": "text",
+  "targetIds": ["clientA", "clientB"],
+  "fileName": "report.pdf",
+  "fileType": "application/pdf",
+  "fileData": "base64-encoded-content"
+}
 ```
 
-- **senderId**: Uses `clientId` from configuration, or defaults to `"openclaw"`
-- **userProperties**: Replies include connection user properties plus `reply_to` for proper routing
+| Field | Required | Description |
+|-------|----------|-------------|
+| `senderId` | Yes | Unique identifier of the sender |
+| `text` | Yes | Message body text |
+| `id` | Auto | Unique message ID (`mqtt-{timestamp}-{random}`) |
+| `timestamp` | Auto | ISO timestamp of the message |
+| `type` | No | `"text"` (default) or `"file"` |
+| `targetIds` | No | Array of target client IDs for @-mention / directed messages |
+| `fileName` | No | File name (when `type: "file"`) |
+| `fileType` | No | MIME type (when `type: "file"`) |
+| `fileData` | No | Base64-encoded file content (when `type: "file"`) |
 
-This dynamic reply mechanism allows publishers to control where responses are delivered, enabling flexible communication patterns between multiple services.
+### Reply Mechanism (MQTT v5.0 User Properties)
 
-If you want to publish custom text via CLI, use the `message` tool:
+Every inbound message **must** include a `reply_to` property in MQTT v5.0 userProperties. The agent publishes replies to the topic specified by `reply_to`.
 
 ```bash
-openclaw agent --message "Send MQTT: Temperature is 23°C"
+mosquitto_pub \
+  --property "user-property" "reply_to=openclaw/reply/my-device" \
+  -t "openclaw/inbound" \
+  -m '{"senderId":"my-device","text":"hello"}'
 ```
+
+If no `reply_to` is provided, replies default to `openclaw/outbound`.
+
+## Chat Types
+
+### Private Chat
+
+Every client that sends a message to the inbound topic registers its `reply_to` topic. The agent stores a mapping of `senderId → replyTopic`.
+
+```
+Device A ──► openclaw/inbound ──► Agent
+              (reply_to: device-a/replies)
+Agent   ──► device-a/replies   ──► Device A
+```
+
+### Group Chat
+
+Group conversations use a separate MQTT topic shared among all members.
+
+**Joining a group:**
+
+Send a control message with `kind: "invite"` to `openclaw/inbound`:
+
+```json
+{
+  "senderId": "group-admin",
+  "text": "join group",
+  "kind": "invite",
+  "topic": "openclaw/groups/room1"
+}
+```
+
+The agent will:
+1. Subscribe to `openclaw/groups/room1`
+2. Publish a `kind: "accept"` confirmation to the group topic
+3. Process all subsequent messages on that topic as group messages
+
+**Leaving a group:**
+
+Send a control message with `kind: "dismissed"`:
+
+```json
+{
+  "senderId": "group-admin",
+  "text": "leave",
+  "kind": "dismissed",
+  "topic": "openclaw/groups/room1"
+}
+```
+
+The agent will:
+1. Publish a `kind: "bye"` notification
+2. Unsubscribe from the group topic
+3. Clean up all member state
+
+**Group message flow:**
+
+```
+Device A ──► openclaw/groups/room1 ──► Agent
+Device B ──► openclaw/groups/room1 ──► Agent
+Agent    ──► openclaw/groups/room1 ──► Device A, Device B (broadcast)
+```
+
+Group replies are broadcast to all members. To direct a reply to specific members, use `targetIds`.
+
+### Targeted Messages (@-mentions)
+
+To @-mention a specific client, include their client ID in the `targetIds` array:
+
+```json
+{
+  "senderId": "device-a",
+  "text": "hello",
+  "targetIds": ["openclaw-agent"]
+}
+```
+
+The agent will:
+- Only reply if its own clientId is in `targetIds`
+- When replying in a group, prepend `@senderName` and include `targetIds: [senderId]`
+- If message has `targetIds` not meant for the agent, it records context without replying
+
+## Tools
+
+### mqtt_send (Agent Tool)
+
+When the plugin is installed, the `mqtt_send` tool is automatically registered in OpenClaw's TOOLS. The agent can use it to proactively send messages.
+
+**Parameters:**
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `text` | Yes | Message text content |
+| `topic` | No* | MQTT topic to publish to (for group messages) |
+| `targetClientId` | No* | Target client ID for private chat (looks up client's registered reply topic) |
+| `targetIds` | No | Array of target client IDs for @-mention |
+| `qos` | No | QoS level (0, 1, 2), defaults to 1 |
+
+*\*Either `topic` or `targetClientId` must be provided, but not both.*
+
+**Sending Rules:**
+
+| Trigger Scenario | Send Target | Behavior |
+|-----------------|-------------|----------|
+| Group message triggered | Received group topic | Prepend `@{senderName}` to text, set `targetIds` to specify recipients |
+| Private chat triggered | Look up target client's registered `reply_to` topic | Error if target client has not registered a topic |
+| Group directed message | Group topic with `targetIds` | Send in the group with `targetIds` for @-mention, not via private topic |
+| Group file sharing | Group topic | Send file as a group message (`type: "file"`), not via private message |
+
+**Examples:**
+
+```json5
+// Group broadcast
+{ "text": "Hello everyone", "topic": "openclaw/groups/room1" }
+
+// Group directed message
+{ "text": "@device-a please check", "topic": "openclaw/groups/room1", "targetIds": ["device-a"] }
+
+// Private chat (auto-resolves topic)
+{ "text": "Hello privately", "targetClientId": "device-a" }
+```
+
+## File Sharing
+
+### Receiving Files
+
+When a message has `type: "file"`, the agent extracts the base64 `fileData` and presents it as a `data:` URL:
+
+```json
+{
+  "senderId": "sensor-1",
+  "text": "screenshot",
+  "type": "file",
+  "fileName": "capture.png",
+  "fileType": "image/png",
+  "fileData": "iVBORw0KGgo..."
+}
+```
+
+### Sending Files
+
+The agent can send files via the standard `outbound.sendMedia` path. Supported input formats:
+
+| Format | Example |
+|--------|---------|
+| `data:` URL | `data:image/png;base64,iVBOR...` |
+| `file://` URL | `file:///path/to/file.pdf` |
+| Absolute path | `/path/to/file.pdf` |
+| Raw base64 | `iVBORw0KGgo...` |
+
+File size limit: **10MB**. Larger files are rejected.
 
 ## Security
 
-**Important:** Any client that can publish to the inbound topic has full access to your OpenClaw agent. Treat MQTT as a **trusted channel only** (restricted broker, auth, private network). If you need untrusted access, add a validation layer before publishing to `openclaw/inbound`.
+**Important:** Any client that can publish to the inbound topic has full access to your OpenClaw agent. Treat MQTT as a **trusted channel only** (restricted broker, auth, private network).
+
+Key security considerations:
+- Use username/password or certificate authentication on the broker
+- Restrict network access to the MQTT broker
+- All clients should use unique `clientId` values
+- The plugin ignores its own messages (detected by matching `senderId` with configured `clientId`)
+
+## Architecture
+
+```
+MQTT Broker (Mosquitto/EMQX)
+     │
+     ├─► openclaw/inbound ───────────► Agent (private messages)
+     │                                    │
+     ├─► openclaw/groups/room1 ────────► Agent (group messages)
+     │                                    │
+     └─◄ {reply_to topic} ◄────────────── Agent (private replies)
+     └─◄ openclaw/groups/room1 ◄───────── Agent (group broadcasts)
+```
+
+The reply topic is determined by the `reply_to` user property in the incoming MQTT v5.0 packet.
 
 ## Development
 
 ```bash
-# Clone (replace with your host)
+# Clone
 git clone ssh://<host>/opt/git/openclaw-mqtt.git
 cd openclaw-mqtt
 
@@ -147,19 +319,6 @@ npm run typecheck
 # Build
 npm run build
 ```
-
-## Architecture
-
-```
-MQTT Broker (Mosquitto/EMQX)
-     │
-     ├─► inbound topic ──► OpenClaw Gateway ──► Agent
-     │
-     └─◄ dynamic reply topic (via reply_to user property) ◄── OpenClaw Gateway ◄── Agent
-```
-
-The reply topic is determined dynamically based on the `reply_to` user property in the incoming message.
-If no `reply_to` property is provided, replies default to `openclaw/outbound`.
 
 ## License
 

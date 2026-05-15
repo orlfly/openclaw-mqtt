@@ -137,6 +137,7 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
       const { cfg, to, target, text, mediaUrl, filePath, media, signal } = params;
       const effectiveTo = to || target;
 
+      console.log(`[sendMedia] called with params:`, JSON.stringify({ to, target, text: text?.slice(0,50), hasMedia: !!media, mediaUrl, filePath, signal: !!signal }));
       if (signal?.aborted) return { ok: false, error: "Aborted" };
 
       const mqtt = cfg?.channels?.mqtt;
@@ -144,13 +145,30 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
       if (!mqttClient || !mqttClient.isConnected()) return { ok: false, error: "MQTT not connected" };
 
       // Support both 'media' (used by framework) and 'mediaUrl'/'filePath' (standard)
-      const resolvedPath = media || filePath || mediaUrl;
+      // media may be an object { url, fileName, mimeType } from the framework, or a string path
+      let resolvedPath: string | undefined;
+      let mediaObj: { url?: string; fileName?: string; mimeType?: string } | undefined;
+
+      if (typeof media === "string") {
+        resolvedPath = media;
+        console.log(`[sendMedia] media is string: ${media.slice(0,100)}`);
+      } else if (media && typeof media === "object") {
+        mediaObj = media;
+        resolvedPath = media.url;
+        console.log(`[sendMedia] media is object:`, JSON.stringify({ url: media.url?.slice(0,100), fileName: media.fileName, mimeType: media.mimeType }));
+      }
+      resolvedPath = resolvedPath ?? filePath ?? mediaUrl;
+      console.log(`[sendMedia] resolvedPath: ${resolvedPath?.slice(0,100) || "(none)"}, filePath: ${filePath}, mediaUrl: ${mediaUrl}`);
       if (!resolvedPath) return { ok: false, error: "Media URL or file path is required" };
 
       try {
-        // Support both mediaUrl and filePath (OpenClaw uses filePath)
-        const url = media || filePath || mediaUrl;
-        const { fileData, fileName: extractedName, fileType, sizeBytes } = extractMediaData({ url, fileName: text });
+        // Use media object fields if available, otherwise construct from URL string
+        const { fileData, fileName: extractedName, fileType, sizeBytes } = extractMediaData({
+          url: resolvedPath,
+          fileName: mediaObj?.fileName ?? text,
+          mimeType: mediaObj?.mimeType,
+        });
+        console.log(`[sendMedia] extractMediaData: fileName=${extractedName}, fileType=${fileType}, sizeBytes=${sizeBytes}`);
 
         if (sizeBytes > MAX_FILE_SIZE_BYTES) {
           return { ok: false, error: `File size exceeds limit. Max: ${MAX_FILE_SIZE_BYTES / (1024 * 1024)}MB, Got: ${(sizeBytes / (1024 * 1024)).toFixed(2)}MB` };
@@ -158,6 +176,7 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
 
         // Determine topic: use replyTopicMap to find the real reply topic
         let rawTopic = effectiveTo ?? to ?? "openclaw/outbound";
+        console.log(`[sendMedia] rawTopic before lookup: ${rawTopic}`);
 
         // If rawTopic looks like a senderId (no / character), look up replyTopicMap
         if (!rawTopic.includes("/")) {
@@ -169,6 +188,7 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
         }
 
         const topic = rawTopic.startsWith("mqtt:") ? rawTopic.slice(5) : rawTopic;
+        console.log(`[sendMedia] final topic: ${topic}`);
 
         const senderId = mqtt?.clientId ?? mqttClient?.getClientId() ?? "openclaw";
         const outboundMsg = buildOutboundMessage(senderId, {
@@ -180,10 +200,13 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
         });
 
         const outboundPayload = JSON.stringify(outboundMsg);
+        console.log(`[sendMedia] publishing to ${topic}, payload.length=${outboundPayload.length}, fileData.length=${fileData.length}`);
         const userProperties = mqttClient.getInitialUserProperties ? mqttClient.getInitialUserProperties() : undefined;
         await mqttClient.publish(topic, outboundPayload, mqtt.qos, userProperties);
+        console.log(`[sendMedia] published successfully`);
         return { ok: true, channel: "mqtt", to: topic };
       } catch (err) {
+        console.error(`[sendMedia] error: ${err}`);
         const error = err instanceof Error ? err.message : String(err);
         return { ok: false, error };
       }
@@ -746,31 +769,39 @@ async function handleInboundMessage(opts: {
              log?.info?.(`MQTT: skipping reply for non-targeted group message (context only)`);
              return;
            }
-          if (!payload.text && !payload.media) {
-            log?.debug?.(`MQTT: skipping empty ${info.kind} reply`);
-            return;
-          }
+           console.log(`[deliver] called: kind=${info.kind}, hasText=${!!payload.text}, hasMedia=${!!payload.media}, text=${payload.text?.slice(0,80)}`);
+           if (!payload.text && !payload.media) {
+             log?.debug?.(`MQTT: skipping empty ${info.kind} reply`);
+             return;
+           }
 
-          if (mqttClient?.isConnected()) {
-            try {
-              const myId = mqttClient.getClientId() || "openclaw";
-              const outOpts: Parameters<typeof buildOutboundMessage>[1] = {
-                text: payload.text,
-              };
+           if (mqttClient?.isConnected()) {
+             try {
+               const myId = mqttClient.getClientId() || "openclaw";
+               const outOpts: Parameters<typeof buildOutboundMessage>[1] = {
+                 text: payload.text,
+               };
 
-              if (payload.media) {
-                outOpts.type = 'file';
-                const { fileData, fileName: extractedName, fileType } = extractMediaData({
-                  url: payload.media.url,
-                  fileName: payload.media.fileName,
-                  mimeType: payload.media.mimeType,
-                });
-                outOpts.fileName = extractedName;
-                outOpts.fileType = fileType;
-                outOpts.fileData = fileData;
-              }
+                if (payload.media) {
+                  outOpts.type = 'file';
+                  console.log(`[deliver] processing media: url=${payload.media.url?.slice(0,100)}, fileName=${payload.media.fileName}, mimeType=${payload.media.mimeType}`);
+                  const { fileData, fileName: extractedName, fileType, sizeBytes } = extractMediaData({
+                    url: payload.media.url,
+                    fileName: payload.media.fileName,
+                    mimeType: payload.media.mimeType,
+                  });
+                  console.log(`[deliver] extractMediaData: fileName=${extractedName}, fileType=${fileType}, fileData.length=${fileData.length}, sizeBytes=${sizeBytes}`);
+                  if (sizeBytes > MAX_FILE_SIZE_BYTES) {
+                    log?.warn?.(`MQTT: reply file too large (${sizeBytes} > ${MAX_FILE_SIZE_BYTES}), skipping`);
+                    return;
+                  }
+                 outOpts.fileName = extractedName;
+                 outOpts.fileType = fileType;
+                 outOpts.fileData = fileData;
+               }
 
-              const outboundPayload = JSON.stringify(buildOutboundMessage(myId, outOpts));
+               const outboundPayload = JSON.stringify(buildOutboundMessage(myId, outOpts));
+               console.log(`[deliver] outboundPayload: ${outboundPayload.slice(0,200)}`);
 
               const userProperties = {
                 ...mqttClient.getInitialUserProperties(),
@@ -809,16 +840,70 @@ async function handleInboundMessage(opts: {
  * MQTT Send Tool - allows the Agent to send messages to MQTT topics
  * with optional targetIds for group member targeting.
  */
+/**
+ * Resolve the MQTT topic from one of:
+ * - direct `topic` string
+ * - `targetClientId` → look up from replyTopicMap
+ * - `conversationLabel` → parse `mqtt:group:{topic}` or `mqtt:{senderId}`
+ */
+function resolveMqttTopic(args: {
+  topic?: string;
+  targetClientId?: string;
+  conversationLabel?: string;
+}): { ok: true; topic: string } | { ok: false; error: string } {
+  const provided = [!!args.topic, !!args.targetClientId, !!args.conversationLabel].filter(Boolean).length;
+  if (provided === 0) {
+    return { ok: false, error: "One of topic, targetClientId, or conversationLabel is required" };
+  }
+  if (provided > 1) {
+    return { ok: false, error: "Provide only one of topic, targetClientId, or conversationLabel" };
+  }
+
+  if (args.topic) {
+    return { ok: true, topic: args.topic };
+  }
+
+  if (args.targetClientId) {
+    const topic = replyTopicMap.get(args.targetClientId);
+    if (!topic) {
+      return { ok: false, error: `Target client '${args.targetClientId}' has not registered a subscription topic via reply_to. Cannot send private message.` };
+    }
+    return { ok: true, topic };
+  }
+
+  // conversationLabel: "mqtt:group:{groupTopic}" or "mqtt:{senderId}"
+  const label = args.conversationLabel!;
+  if (label.startsWith("mqtt:group:")) {
+    const groupTopic = label.slice("mqtt:group:".length);
+    if (!groupTopic) {
+      return { ok: false, error: "Invalid conversationLabel: missing group topic" };
+    }
+    return { ok: true, topic: groupTopic };
+  }
+  if (label.startsWith("mqtt:")) {
+    const senderId = label.slice("mqtt:".length);
+    const topic = replyTopicMap.get(senderId);
+    if (!topic) {
+      return { ok: false, error: `Sender '${senderId}' from conversationLabel has no registered reply topic` };
+    }
+    return { ok: true, topic };
+  }
+
+  return { ok: false, error: `Unrecognized conversationLabel format: '${label}'. Expected 'mqtt:group:{topic}' or 'mqtt:{senderId}'` };
+}
+
 export function createMqttSendTool() {
   return {
     name: "mqtt_send",
     label: "MQTT Send",
-    description: "Send a message to an MQTT topic (e.g., a group topic), with optional targetIds to direct the message to specific group members.",
+    description: "Send a message via MQTT. Pass the conversationLabel from your context to auto-resolve the topic, or specify topic/targetClientId directly.",
     parameters: {
       type: "object",
       properties: {
         text: { type: "string", description: "Message text content" },
-        topic: { type: "string", description: "MQTT topic to publish to" },
+        topic: { type: "string", description: "MQTT topic to publish to (for group messages)" },
+        targetClientId: { type: "string", description: "Target client ID for private chat (looks up the client's registered reply topic)" },
+        conversationLabel: { type: "string", description: "Conversation label from context, e.g. 'mqtt:group:openclaw/groups/room1' (group) or 'mqtt:device-a' (private). Auto-resolves to the correct topic." },
         targetIds: {
           type: "array",
           items: { type: "string" },
@@ -831,26 +916,43 @@ export function createMqttSendTool() {
           description: "MQTT QoS level (0, 1, or 2)",
         },
       },
-      required: ["text", "topic"],
+      required: ["text"],
     },
     execute: async (_toolCallId: string, args: any) => {
+      console.log(`[mqtt_send] execute called with args:`, JSON.stringify(args));
+
       if (!mqttClient?.isConnected()) {
+        console.warn(`[mqtt_send] MQTT not connected`);
         return { ok: false, error: "MQTT not connected" };
       }
 
+      // Resolve topic from one of the three mutually exclusive sources
+      const resolved = resolveMqttTopic(args);
+      if (!resolved.ok) {
+        return resolved;
+      }
+      const topic = resolved.topic;
+
       const myId = mqttClient.getClientId() || "openclaw";
       const targetIds: string[] | undefined = args.targetIds?.length > 0 ? args.targetIds : undefined;
+      console.log(`[mqtt_send] myId=${myId}, targetIds=${JSON.stringify(targetIds)}, hasTargetIds=${!!targetIds}`);
 
       const outOpts: Parameters<typeof buildOutboundMessage>[1] = {
         text: args.text,
         ...(targetIds ? { targetIds } : {}),
       };
+      console.log(`[mqtt_send] outOpts:`, JSON.stringify(outOpts));
 
-      const payload = JSON.stringify(buildOutboundMessage(myId, outOpts));
+      const msg = buildOutboundMessage(myId, outOpts);
+      const payload = JSON.stringify(msg);
+      console.log(`[mqtt_send] built message:`, JSON.stringify(msg));
+      console.log(`[mqtt_send] publishing to topic=${topic}, qos=${args.qos ?? 1}, payload.length=${payload.length}`);
+
       const qos = (args.qos ?? 1) as 0 | 1 | 2;
 
-      await mqttClient.publish(args.topic, payload, qos, mqttClient.getInitialUserProperties());
-      return { ok: true, topic: args.topic, targetIds };
+      await mqttClient.publish(topic, payload, qos, mqttClient.getInitialUserProperties());
+      console.log(`[mqtt_send] published successfully`);
+      return { ok: true, topic, targetIds };
     },
   };
 }
