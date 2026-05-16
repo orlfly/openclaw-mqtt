@@ -15,6 +15,9 @@ const replyTopicMap: Map<string, string> = new Map();
 // Track group members for session cleanup on dismiss: groupTopic -> Set<senderId>
 const groupMembersMap: Map<string, Set<string>> = new Map();
 
+// Track display name -> clientId mappings for @-mention resolution
+const displayNameToClientIdMap: Map<string, string> = new Map();
+
 // File size limit: 10MB
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 
@@ -416,6 +419,11 @@ async function handleGroupMessage(opts: {
       senderId = msg.senderId;
       senderName = packet?.properties?.userProperties?.name as string || senderId;
 
+      // Store display name -> clientId mapping for @-mention resolution
+      if (senderName !== senderId) {
+        displayNameToClientIdMap.set(senderName, senderId);
+      }
+
       if (senderId === mySenderId) {
         log?.debug?.(`MQTT: ignoring self-sent message from ${senderId}`);
         return;
@@ -462,11 +470,11 @@ async function handleGroupMessage(opts: {
       CommandAuthorized: true,
       From: `mqtt:${senderId}`,
       To: `mqtt:${groupTopic}`,  // group message: use groupTopic as reply target
-      SessionKey: `agent:main:mqtt:${senderId}`,
+      SessionKey: `agent:main:mqtt:group:${groupTopic}`,
       AccountId: accountId,
       ChatType: "direct",
       ConversationLabel: `mqtt:group:${groupTopic}`,
-      SenderName: senderId,
+      SenderName: senderName,
       SenderId: senderId,
       Provider: "mqtt",
       Surface: "mqtt",
@@ -695,12 +703,19 @@ async function handleInboundMessage(opts: {
 
     let messageBody: string;
     let senderId: string;
+    let senderName: string;
     let messageType: string = "text";
     let fileMedia: Array<{ url: string; mimeType?: string; fileName?: string }> | undefined;
     let shouldReply = true;
 
     if (msg) {
       senderId = msg.senderId;
+      senderName = packet?.properties?.userProperties?.name as string || senderId;
+
+      // Store display name -> clientId mapping for @-mention resolution
+      if (senderName !== senderId) {
+        displayNameToClientIdMap.set(senderName, senderId);
+      }
 
       if (senderId === mySenderId) {
         log?.info?.(`MQTT: ignoring self-sent message from ${senderId}`);
@@ -733,6 +748,7 @@ async function handleInboundMessage(opts: {
       // Legacy plain text fallback
       messageBody = text;
       senderId = topic.replace(/\//g, "-");
+      senderName = senderId;
     }
 
     // Store replyTopic BEFORE dispatchReply so resolveTarget can find it
@@ -750,7 +766,7 @@ async function handleInboundMessage(opts: {
       AccountId: accountId,
       ChatType: "direct",
       ConversationLabel: `mqtt:${senderId}`,
-      SenderName: senderId,
+      SenderName: senderName,
       SenderId: senderId,
       Provider: "mqtt",
       Surface: "mqtt",
@@ -896,18 +912,23 @@ export function createMqttSendTool() {
   return {
     name: "mqtt_send",
     label: "MQTT Send",
-    description: "Send a message via MQTT. Pass the conversationLabel from your context to auto-resolve the topic, or specify topic/targetClientId directly.",
+    description: "Send a message via MQTT. In a group chat, always use the conversationLabel from your context to reply to the group. In a private chat, use conversationLabel or targetClientId to look up the reply topic. Use targetNames to @-mention group members by display name.",
     parameters: {
       type: "object",
       properties: {
         text: { type: "string", description: "Message text content" },
-        topic: { type: "string", description: "MQTT topic to publish to (for group messages)" },
+        topic: { type: "string", description: "MQTT topic to publish to (for explicit group messages)" },
         targetClientId: { type: "string", description: "Target client ID for private chat (looks up the client's registered reply topic)" },
-        conversationLabel: { type: "string", description: "Conversation label from context, e.g. 'mqtt:group:openclaw/groups/room1' (group) or 'mqtt:device-a' (private). Auto-resolves to the correct topic." },
+        conversationLabel: { type: "string", description: "Pass the ConversationLabel from your context directly. Format: 'mqtt:group:{topic}' for group, 'mqtt:{senderId}' for private. This is the recommended way to set the target." },
         targetIds: {
           type: "array",
           items: { type: "string" },
-          description: "Target specific group member IDs (omit to broadcast to all group members)",
+          description: "Target specific group member client IDs (omit to broadcast to all group members)",
+        },
+        targetNames: {
+          type: "array",
+          items: { type: "string" },
+          description: "Target group members by display name (e.g. ['测试管理']). Automatically resolved to their client IDs for @-mention.",
         },
         qos: {
           type: "integer",
@@ -926,7 +947,6 @@ export function createMqttSendTool() {
         return { ok: false, error: "MQTT not connected" };
       }
 
-      // Resolve topic from one of the three mutually exclusive sources
       const resolved = resolveMqttTopic(args);
       if (!resolved.ok) {
         return resolved;
@@ -934,7 +954,33 @@ export function createMqttSendTool() {
       const topic = resolved.topic;
 
       const myId = mqttClient.getClientId() || "openclaw";
-      const targetIds: string[] | undefined = args.targetIds?.length > 0 ? args.targetIds : undefined;
+
+      // Resolve targetIds: merge resolved targetNames with explicit targetIds
+      let targetIds: string[] | undefined = undefined;
+      const explicitIds = args.targetIds?.length > 0 ? args.targetIds : undefined;
+      const rawNames: string[] | undefined = args.targetNames?.length > 0 ? args.targetNames : undefined;
+
+      if (rawNames && rawNames.length > 0) {
+        const resolvedIds: string[] = [];
+        const unresolved: string[] = [];
+        for (const name of rawNames) {
+          const id = displayNameToClientIdMap.get(name);
+          if (id) {
+            resolvedIds.push(id);
+          } else {
+            unresolved.push(name);
+          }
+        }
+        if (unresolved.length > 0) {
+          return { ok: false, error: `Cannot resolve client IDs for names: ${unresolved.join(", ")}. These clients have not sent a message with a 'name' user property yet.` };
+        }
+        targetIds = resolvedIds;
+      }
+      // Merge with explicit targetIds if provided
+      if (explicitIds) {
+        const dedup = new Set([...targetIds ?? [], ...explicitIds]);
+        targetIds = [...dedup];
+      }
       console.log(`[mqtt_send] myId=${myId}, targetIds=${JSON.stringify(targetIds)}, hasTargetIds=${!!targetIds}`);
 
       const outOpts: Parameters<typeof buildOutboundMessage>[1] = {

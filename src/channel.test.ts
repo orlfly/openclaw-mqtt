@@ -529,6 +529,29 @@ describe("inbound message parsing", () => {
     controller.abort();
     await startPromise;
   });
+
+  it("should use display name from user properties as SenderName", async () => {
+    const { controller, startPromise } = await startAccount();
+
+    mockDispatchReply.mockClear();
+    getMockClient()?.simulateMessage("test/in", JSON.stringify({
+      id: "m1",
+      text: "hello",
+      senderId: "device-abc",
+      timestamp: new Date().toISOString(),
+    }), {
+      properties: {
+        userProperties: { reply_to: "device-abc/replies", name: "测试管理" },
+      },
+    });
+
+    const lastCall = mockDispatchReply.mock.calls.at(-1)?.[0];
+    expect(lastCall?.ctx?.SenderName).toBe("测试管理");
+    expect(lastCall?.ctx?.SenderId).toBe("device-abc");
+
+    controller.abort();
+    await startPromise;
+  });
 });
 
 describe("mqtt_send tool", () => {
@@ -775,5 +798,53 @@ describe("mqtt_send tool", () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toBe("MQTT not connected");
+  });
+
+  it("should resolve targetNames to clientIds", async () => {
+    const { controller, startPromise } = await startAccount();
+
+    // Simulate group message from "测试管理" with a display name in user properties
+    const mock = getMockClient();
+    mock?.simulateMessage("test/in", JSON.stringify({
+      id: "msg-001",
+      text: "hello",
+      senderId: "test-mgr-01",
+      timestamp: new Date().toISOString(),
+    }), {
+      properties: {
+        userProperties: { reply_to: "openclaw/groups/team", name: "测试管理" },
+      },
+    });
+
+    const tool = createMqttSendTool();
+    const result = await tool.execute("call-10", {
+      text: "@测试管理 请把基础设定发给我",
+      conversationLabel: "mqtt:group:openclaw/groups/team",
+      targetNames: ["测试管理"],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.topic).toBe("openclaw/groups/team");
+    expect(result.targetIds).toEqual(["test-mgr-01"]);
+
+    controller.abort();
+    await startPromise;
+  });
+
+  it("should return error for unresolved targetNames", async () => {
+    const { controller, startPromise } = await startAccount();
+
+    const tool = createMqttSendTool();
+    const result = await tool.execute("call-11", {
+      text: "@unknown 请回复",
+      conversationLabel: "mqtt:group:openclaw/groups/team",
+      targetNames: ["UnknownUser"],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("Cannot resolve client IDs");
+
+    controller.abort();
+    await startPromise;
   });
 });
