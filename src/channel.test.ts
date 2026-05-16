@@ -609,13 +609,13 @@ describe("mqtt_send tool", () => {
     setMqttRuntime(mockRuntime as any);
   });
 
-  it("should publish to specified topic (group message)", async () => {
+  it("should publish to group topic via conversationLabel", async () => {
     const { controller, startPromise } = await startAccount();
 
     const tool = createMqttSendTool();
     const result = await tool.execute("call-1", {
       text: "Hello group",
-      topic: "openclaw/group/room1",
+      conversationLabel: "mqtt:group:openclaw/group/room1",
       targetIds: ["clientA", "clientB"],
     });
 
@@ -698,7 +698,7 @@ describe("mqtt_send tool", () => {
     const result = await tool.execute("call-4", { text: "Hello" });
 
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("One of topic, targetClientId, or conversationLabel");
+    expect(result.error).toContain("One of targetClientId or conversationLabel");
 
     controller.abort();
     await startPromise;
@@ -710,7 +710,7 @@ describe("mqtt_send tool", () => {
     const tool = createMqttSendTool();
     const result = await tool.execute("call-5", {
       text: "Hello",
-      topic: "some/topic",
+      conversationLabel: "mqtt:group:some/topic",
       targetClientId: "some-device",
     });
 
@@ -793,7 +793,7 @@ describe("mqtt_send tool", () => {
     const tool = createMqttSendTool();
     const result = await tool.execute("call-9", {
       text: "Hello",
-      topic: "some/topic",
+      conversationLabel: "mqtt:group:some/topic",
     });
 
     expect(result.ok).toBe(false);

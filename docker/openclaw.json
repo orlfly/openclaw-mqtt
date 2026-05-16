@@ -16,11 +16,14 @@
     "defaults": {
       "workspace": "/home/node/.openclaw/workspace",
       "model": {
-        "primary": "tencent/glm-5.1"
+        "primary": "minimaxi/MiniMax-M2.7"
       },
       "models": {
-        "tencent/glm-5.1": {
-          "alias": "glm-5.1"
+        "ark/doubao-seed-2.0-lite": {
+          "alias": "doubao-seed-2.0-lite"
+        },
+        "minimaxi/MiniMax-M2.7": {
+          "alias": "MiniMax-M2.7"
         }
       },
       "compaction": {
@@ -29,23 +32,46 @@
     }
   },
   "wizard": {
-    "lastRunAt": "2026-04-27T06:42:16.382Z",
-    "lastRunVersion": "2026.4.22",
-    "lastRunCommand": "configure",
+    "lastRunAt": "2026-05-12T05:17:24.901Z",
+    "lastRunVersion": "2026.5.7",
+    "lastRunCommand": "doctor",
     "lastRunMode": "local"
   },
   "models": {
     "mode": "merge",
     "providers": {
-      "tencent": {
-        "baseUrl": "https://api.lkeap.cloud.tencent.com/plan/v3",
+      "ark": {
+        "baseUrl": "https://ark.cn-beijing.volces.com/api/plan/v3",
         "api": "openai-completions",
-        "apiKey": "sk-tp-ooTUIoXIbUY49CDb6Ilu5N72dH7rbXAmGIFJ82AkOWmJAtma",
+        "apiKey": "ark-9f854cdb-0057-47bc-b4d1-81e2a4c97ccc-17cfa",
         "models": [
           {
-            "id": "glm-5.1",
-            "name": "glm-5.1 (Custom Provider)",
+            "id": "doubao-seed-2.0-lite",
+            "name": "doubao-seed-2.0-lite",
             "contextWindow": 1600000,
+            "maxTokens": 40960,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "reasoning": false
+          }
+        ]
+      },
+      "minimaxi": {
+        "baseUrl": "https://api.minimaxi.com/anthropic",
+        "api": "anthropic-messages",
+        "apiKey": "sk-cp-igzJisoz2CAwkEjRFwoLpTnCt82qX0-KHdhLXF3iAk_P5T76A9RJ1vfquvSc6g99P7v_nsVS-w_VhY0IiHZG5lecLGNgFkumlndnFnw6v8SOFdF8XWG2n1U",
+        "models": [
+          {
+            "id": "MiniMax-M2.7",
+            "name": "MiniMax-M2.7 (Custom Provider)",
+            "contextWindow": 160000,
             "maxTokens": 40960,
             "input": [
               "text"
@@ -63,22 +89,153 @@
     }
   },
   "meta": {
-    "lastTouchedVersion": "2026.4.22",
-    "lastTouchedAt": "2026-05-07T08:38:33.742Z"
+    "lastTouchedVersion": "2026.5.7",
+    "lastTouchedAt": "2026-05-14T00:45:45.494Z"
   },
-  "plugins": {
+  "messages": {
+    "groupChat": {
+      "visibleReplies": "message_tool"
+    }
+  },
+  "skills": {
     "entries": {
-      "mqtt": {
-        "enabled": true
-      }
-    },
-    "installs": {
-      "mqtt": {
-        "source": "path",
-        "sourcePath": "/opt/workspace/openclaw-mqtt",
-        "installPath": "/home/cc/.openclaw/extensions/mqtt",
-        "version": "0.1.17",
-        "installedAt": "2026-05-07T08:38:33.265Z"
+      "1password": {
+        "enabled": false
+      },
+      "apple-notes": {
+        "enabled": false
+      },
+      "apple-reminders": {
+        "enabled": false
+      },
+      "bear-notes": {
+        "enabled": false
+      },
+      "blogwatcher": {
+        "enabled": false
+      },
+      "blucli": {
+        "enabled": false
+      },
+      "bluebubbles": {
+        "enabled": false
+      },
+      "camsnap": {
+        "enabled": false
+      },
+      "clawhub": {
+        "enabled": false
+      },
+      "coding-agent": {
+        "enabled": false
+      },
+      "discord": {
+        "enabled": false
+      },
+      "eightctl": {
+        "enabled": false
+      },
+      "gemini": {
+        "enabled": false
+      },
+      "gh-issues": {
+        "enabled": false
+      },
+      "gifgrep": {
+        "enabled": false
+      },
+      "github": {
+        "enabled": false
+      },
+      "gog": {
+        "enabled": false
+      },
+      "goplaces": {
+        "enabled": false
+      },
+      "himalaya": {
+        "enabled": false
+      },
+      "imsg": {
+        "enabled": false
+      },
+      "mcporter": {
+        "enabled": false
+      },
+      "model-usage": {
+        "enabled": false
+      },
+      "nano-pdf": {
+        "enabled": false
+      },
+      "notion": {
+        "enabled": false
+      },
+      "obsidian": {
+        "enabled": false
+      },
+      "openai-whisper": {
+        "enabled": false
+      },
+      "openai-whisper-api": {
+        "enabled": false
+      },
+      "openhue": {
+        "enabled": false
+      },
+      "oracle": {
+        "enabled": false
+      },
+      "ordercli": {
+        "enabled": false
+      },
+      "peekaboo": {
+        "enabled": false
+      },
+      "sag": {
+        "enabled": false
+      },
+      "session-logs": {
+        "enabled": false
+      },
+      "sherpa-onnx-tts": {
+        "enabled": false
+      },
+      "slack": {
+        "enabled": false
+      },
+      "songsee": {
+        "enabled": false
+      },
+      "sonoscli": {
+        "enabled": false
+      },
+      "spotify-player": {
+        "enabled": false
+      },
+      "summarize": {
+        "enabled": false
+      },
+      "things-mac": {
+        "enabled": false
+      },
+      "tmux": {
+        "enabled": false
+      },
+      "trello": {
+        "enabled": false
+      },
+      "video-frames": {
+        "enabled": false
+      },
+      "voice-call": {
+        "enabled": false
+      },
+      "wacli": {
+        "enabled": false
+      },
+      "xurl": {
+        "enabled": false
       }
     }
   },
@@ -94,10 +251,17 @@
       "username": "openclaw",
       "userProperties": {
         "description": "高级测试人员，能完成需求文档的理解并基于此编写各种测试用例。",
-        "emoji": "",
-	"name": "测试管理"
+        "emoji": "🧪",
+        "name": "测试管理"
       },
       "password": "kingsware@123"
+    }
+  },
+  "plugins": {
+    "entries": {
+      "mqtt": {
+        "enabled": true
+      }
     }
   }
 }

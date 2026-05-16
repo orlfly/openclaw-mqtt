@@ -857,26 +857,20 @@ async function handleInboundMessage(opts: {
  * with optional targetIds for group member targeting.
  */
 /**
- * Resolve the MQTT topic from one of:
- * - direct `topic` string
+ * Resolve the MQTT topic from:
  * - `targetClientId` → look up from replyTopicMap
  * - `conversationLabel` → parse `mqtt:group:{topic}` or `mqtt:{senderId}`
  */
 function resolveMqttTopic(args: {
-  topic?: string;
   targetClientId?: string;
   conversationLabel?: string;
 }): { ok: true; topic: string } | { ok: false; error: string } {
-  const provided = [!!args.topic, !!args.targetClientId, !!args.conversationLabel].filter(Boolean).length;
+  const provided = [!!args.targetClientId, !!args.conversationLabel].filter(Boolean).length;
   if (provided === 0) {
-    return { ok: false, error: "One of topic, targetClientId, or conversationLabel is required" };
+    return { ok: false, error: "One of targetClientId or conversationLabel is required" };
   }
   if (provided > 1) {
-    return { ok: false, error: "Provide only one of topic, targetClientId, or conversationLabel" };
-  }
-
-  if (args.topic) {
-    return { ok: true, topic: args.topic };
+    return { ok: false, error: "Provide only one of targetClientId or conversationLabel" };
   }
 
   if (args.targetClientId) {
@@ -917,7 +911,6 @@ export function createMqttSendTool() {
       type: "object",
       properties: {
         text: { type: "string", description: "Message text content" },
-        topic: { type: "string", description: "MQTT topic to publish to (for explicit group messages)" },
         targetClientId: { type: "string", description: "Target client ID for private chat (looks up the client's registered reply topic)" },
         conversationLabel: { type: "string", description: "Pass the ConversationLabel from your context directly. Format: 'mqtt:group:{topic}' for group, 'mqtt:{senderId}' for private. This is the recommended way to set the target." },
         targetIds: {
