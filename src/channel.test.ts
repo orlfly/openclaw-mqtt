@@ -1,8 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { resetMock, getMockClient } from "./__mocks__/mqtt.js";
+import * as fs from "fs";
 
 // Mock the mqtt module
 vi.mock("mqtt", () => import("./__mocks__/mqtt.js"));
+
+// Mock fs module for file saving tests
+vi.mock("fs", async () => {
+  const actual = await vi.importActual<typeof fs>("fs");
+  return {
+    ...actual,
+    existsSync: vi.fn(() => true),
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn(),
+  };
+});
 
 // Import after mocking
 import { mqttPlugin, createMqttSendTool } from "./channel.js";
@@ -548,6 +560,41 @@ describe("inbound message parsing", () => {
     const lastCall = mockDispatchReply.mock.calls.at(-1)?.[0];
     expect(lastCall?.ctx?.SenderName).toBe("测试管理");
     expect(lastCall?.ctx?.SenderId).toBe("device-abc");
+
+    controller.abort();
+    await startPromise;
+  });
+
+  it("should save incoming file to disk and pass file path to agent", async () => {
+    const { controller, startPromise } = await startAccount();
+
+    mockDispatchReply.mockClear();
+    const fileBase64 = Buffer.from("test file content").toString("base64");
+    getMockClient()?.simulateMessage("test/in", JSON.stringify({
+      id: "msg-file-001",
+      text: "here is a file",
+      senderId: "file-sender",
+      timestamp: new Date().toISOString(),
+      type: "file",
+      fileName: "test.txt",
+      fileType: "text/plain",
+      fileData: fileBase64,
+    }), {
+      properties: {
+        userProperties: { reply_to: "file-sender/replies" },
+      },
+    });
+
+    expect(fs.writeFileSync).toHaveBeenCalled();
+    const writeCall = (fs.writeFileSync as any).mock.calls.at(-1);
+    const savedPath = writeCall[0];
+    expect(savedPath).toContain("test.txt");
+
+    const lastCall = mockDispatchReply.mock.calls.at(-1)?.[0];
+    expect(lastCall?.ctx?.Media).toBeDefined();
+    expect(lastCall?.ctx?.Media[0].url).toBe(savedPath);
+    expect(lastCall?.ctx?.Media[0].mimeType).toBe("text/plain");
+    expect(lastCall?.ctx?.Media[0].fileName).toBe("test.txt");
 
     controller.abort();
     await startPromise;

@@ -78,6 +78,7 @@ Sensitive configuration can be set via environment variables:
 | `MQTT_PASSWORD` | Broker password |
 | `MQTT_CLIENT_ID` | Client ID (used as senderId) |
 | `MQTT_USER_PROPERTIES` | JSON string of user properties |
+| `MQTT_FILES_DIR` | Directory for saving incoming files (default: `{workspaceDir}/received_files/`) |
 
 Environment variables take precedence over values in openclaw.json.
 
@@ -216,30 +217,34 @@ When the plugin is installed, the `mqtt_send` tool is automatically registered i
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `text` | Yes | Message text content |
-| `topic` | No* | MQTT topic to publish to (for group messages) |
 | `targetClientId` | No* | Target client ID for private chat (looks up client's registered reply topic) |
+| `conversationLabel` | No* | Pass the ConversationLabel from your context directly (recommended) |
 | `targetIds` | No | Array of target client IDs for @-mention |
+| `targetNames` | No | Array of display names for @-mention (auto-resolved to client IDs) |
 | `qos` | No | QoS level (0, 1, 2), defaults to 1 |
 
-*\*Either `topic` or `targetClientId` must be provided, but not both.*
+*\*Either `targetClientId` or `conversationLabel` must be provided, but not both.*
 
 **Sending Rules:**
 
 | Trigger Scenario | Send Target | Behavior |
 |-----------------|-------------|----------|
-| Group message triggered | Received group topic | Prepend `@{senderName}` to text, set `targetIds` to specify recipients |
-| Private chat triggered | Look up target client's registered `reply_to` topic | Error if target client has not registered a topic |
+| Group message triggered | Use `conversationLabel` from context | Prepend `@{senderName}` to text, set `targetIds` to specify recipients |
+| Private chat triggered | Use `targetClientId` to look up registered `reply_to` topic | Error if target client has not registered a topic |
 | Group directed message | Group topic with `targetIds` | Send in the group with `targetIds` for @-mention, not via private topic |
 | Group file sharing | Group topic | Send file as a group message (`type: "file"`), not via private message |
 
 **Examples:**
 
 ```json5
-// Group broadcast
-{ "text": "Hello everyone", "topic": "openclaw/groups/room1" }
+// Group broadcast (use conversationLabel from context)
+{ "text": "Hello everyone", "conversationLabel": "mqtt:group:openclaw/groups/room1" }
 
 // Group directed message
-{ "text": "@device-a please check", "topic": "openclaw/groups/room1", "targetIds": ["device-a"] }
+{ "text": "@device-a please check", "conversationLabel": "mqtt:group:openclaw/groups/room1", "targetIds": ["device-a"] }
+
+// Group with display name targeting
+{ "text": "@测试管理 请回复", "conversationLabel": "mqtt:group:openclaw/groups/room1", "targetNames": ["测试管理"] }
 
 // Private chat (auto-resolves topic)
 { "text": "Hello privately", "targetClientId": "device-a" }
@@ -249,7 +254,7 @@ When the plugin is installed, the `mqtt_send` tool is automatically registered i
 
 ### Receiving Files
 
-When a message has `type: "file"`, the agent extracts the base64 `fileData` and presents it as a `data:` URL:
+When a message has `type: "file"`, the agent **first saves the file to disk**, then passes the local file path to the agent for processing:
 
 ```json
 {
@@ -261,6 +266,20 @@ When a message has `type: "file"`, the agent extracts the base64 `fileData` and 
   "fileData": "iVBORw0KGgo..."
 }
 ```
+
+**Flow:**
+1. Decode base64 `fileData` to binary
+2. Save to disk: `~/.openclaw/mqtt-files/{timestamp}-{random}-{fileName}`
+3. Pass file path to agent via `Media` field (not base64 data)
+4. Agent reads file from disk as needed
+
+**File receive directory:**
+- Default: `{workspaceDir}/received_files/` (under the OpenClaw workspace directory)
+- Override: `MQTT_FILES_DIR` environment variable
+- File naming: `{timestamp}-{random}-{originalFileName}` (avoids collisions)
+- Max size: 10MB (same as outbound limit)
+
+If saving fails, falls back to `data:` URL.
 
 ### Sending Files
 

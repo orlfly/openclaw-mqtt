@@ -5,6 +5,7 @@ import { mqttOnboardingAdapter } from "./onboarding.js";
 import { getMqttRuntime } from "./runtime.js";
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 
 // Global client instance (one per gateway lifecycle)
 let mqttClient: MqttClientManager | null = null;
@@ -20,6 +21,38 @@ const displayNameToClientIdMap: Map<string, string> = new Map();
 
 // File size limit: 10MB
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+
+// Workspace directory (set when gateway starts)
+let workspaceDir: string | null = null;
+
+// File receive directory (workspace/received_files by default)
+function getFilesDir(): string {
+  if (process.env.MQTT_FILES_DIR) return process.env.MQTT_FILES_DIR;
+  const base = workspaceDir ?? path.join(os.homedir(), ".openclaw", "workspace");
+  return path.join(base, "received_files");
+}
+
+function saveIncomingFile(fileData: string, fileName: string, fileType: string, log?: any): string {
+  const filesDir = getFilesDir();
+
+  if (!fs.existsSync(filesDir)) {
+    fs.mkdirSync(filesDir, { recursive: true });
+    log?.info?.(`Created MQTT files directory: ${filesDir}`);
+  }
+
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).slice(2, 8);
+  const sanitizedName = path.basename(fileName === "unknown" ? "file" : fileName);
+  const baseName = `${timestamp}-${random}-${sanitizedName}`;
+  const filePath = path.join(filesDir, baseName);
+
+  const buffer = Buffer.from(fileData, "base64");
+  fs.writeFileSync(filePath, buffer);
+
+  log?.info?.(`Saved incoming file: ${filePath} (${buffer.length} bytes)`);
+
+  return filePath;
+}
 
 /**
  * MQTT Channel Plugin for OpenClaw
@@ -218,7 +251,17 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
 
   gateway: {
     startAccount: async (ctx: any) => {
-      const { cfg, account, accountId, abortSignal, log } = ctx;
+      const { cfg, account, accountId, abortSignal, log, workspaceDir: wsDir } = ctx;
+
+      // Capture workspace directory for file storage
+      if (wsDir) {
+        workspaceDir = wsDir;
+      } else {
+        const configuredWorkspace = cfg?.agents?.defaults?.workspace;
+        if (configuredWorkspace) {
+          workspaceDir = configuredWorkspace;
+        }
+      }
 
       const mqtt = cfg.channels?.mqtt;
       if (!mqtt?.brokerUrl) {
@@ -451,8 +494,14 @@ async function handleGroupMessage(opts: {
         messageBody = msg.text ?? `[File: ${fileName} (${fileType})]`;
 
         if (msg.fileData) {
-          const dataUrl = `data:${fileType};base64,${msg.fileData}`;
-          fileMedia = [{ url: dataUrl, mimeType: fileType, fileName }];
+          try {
+            const filePath = saveIncomingFile(msg.fileData, fileName, fileType, log);
+            fileMedia = [{ url: filePath, mimeType: fileType, fileName }];
+          } catch (err) {
+            log?.warn?.(`Failed to save file to disk, falling back to data URL: ${err}`);
+            const dataUrl = `data:${fileType};base64,${msg.fileData}`;
+            fileMedia = [{ url: dataUrl, mimeType: fileType, fileName }];
+          }
         }
       } else {
         messageBody = msg.text ?? "";
@@ -738,8 +787,14 @@ async function handleInboundMessage(opts: {
         messageBody = msg.text ?? `[File: ${fileName} (${fileType})]`;
 
         if (msg.fileData) {
-          const dataUrl = `data:${fileType};base64,${msg.fileData}`;
-          fileMedia = [{ url: dataUrl, mimeType: fileType, fileName }];
+          try {
+            const filePath = saveIncomingFile(msg.fileData, fileName, fileType, log);
+            fileMedia = [{ url: filePath, mimeType: fileType, fileName }];
+          } catch (err) {
+            log?.warn?.(`Failed to save file to disk, falling back to data URL: ${err}`);
+            const dataUrl = `data:${fileType};base64,${msg.fileData}`;
+            fileMedia = [{ url: dataUrl, mimeType: fileType, fileName }];
+          }
         }
       } else {
         messageBody = msg.text ?? "";
