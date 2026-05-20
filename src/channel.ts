@@ -130,23 +130,27 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
       const trimmed = to.trim();
       const withoutPrefix = trimmed.startsWith("mqtt:") ? trimmed.slice(5) : trimmed;
 
-      // If it looks like a senderId (no / character), construct full topic
+      // If it looks like a senderId (no / character), look up replyTopicMap
       if (!withoutPrefix.includes("/")) {
         // Try replyTopicMap first
         const storedTopic = replyTopicMap.get(withoutPrefix);
+        console.log(`[resolveTarget-DEBUG] to=${to}, withoutPrefix=${withoutPrefix}, storedTopic=${storedTopic ?? "(not found)"}, replyTopicMapSize=${replyTopicMap.size}`);
         if (storedTopic) {
           return { ok: true, to: `mqtt:${storedTopic}` };
         }
-        // Fallback: construct topic as senderId/inbound
-        return { ok: true, to: `mqtt:${withoutPrefix}/inbound` };
+        // Not found: return error - target client hasn't registered a reply topic
+        console.log(`[resolveTarget-DEBUG] sender ${withoutPrefix} not registered, returning error`);
+        return { ok: false, error: new Error(`Target client '${withoutPrefix}' has not registered a reply topic. Only send to clients that have sent you a message first.`) };
       }
 
       // Already has /, return with mqtt: prefix
+      console.log(`[resolveTarget-DEBUG] direct topic: ${to}`);
       return { ok: true, to: `mqtt:${withoutPrefix}` };
     },
 
     async sendText(params: any) {
       const { cfg, to, text, signal } = params;
+      console.log(`[sendText-DEBUG] called: to=${to}, text=${text?.slice(0,80)}`);
       if (signal?.aborted) return { ok: false, error: "Aborted" };
 
       const mqtt = cfg?.channels?.mqtt;
@@ -155,15 +159,25 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
       if (!text) return { ok: false, error: "Text required" };
 
       try {
-        const topic = to ?? "openclaw/outbound";
+        const rawTopic = to ?? "openclaw/outbound";
+
+        // Try replyTopicMap: extract senderId from the topic path for lookup
+        const withoutPrefix = rawTopic.startsWith("mqtt:") ? rawTopic.slice(5) : rawTopic;
+        const candidateId = withoutPrefix.includes("/") ? withoutPrefix.split("/")[0] : withoutPrefix;
+        const storedTopic = candidateId ? replyTopicMap.get(candidateId) : undefined;
+        const topic = storedTopic ?? withoutPrefix;
+
+        console.log(`[sendText-DEBUG] rawTopic=${rawTopic}, candidateId=${candidateId}, storedTopic=${storedTopic ?? "(not found)"}, final topic=${topic}`);
         const senderId = mqtt?.clientId ?? mqttClient?.getClientId() ?? "openclaw";
         const outboundMsg = buildOutboundMessage(senderId, { text });
         const outboundPayload = JSON.stringify(outboundMsg);
         const userProperties = mqttClient.getInitialUserProperties ? mqttClient.getInitialUserProperties() : undefined;
+        console.log(`[sendText-DEBUG] publishing to ${topic}, userProperties.reply_to=${userProperties?.reply_to ?? "(not set)"}`);
         await mqttClient.publish(topic, outboundPayload, mqtt.qos, userProperties);
         return { ok: true, channel: "mqtt", to: topic };
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
+        console.log(`[sendText-DEBUG] error: ${error}`);
         return { ok: false, error };
       }
     },
@@ -212,19 +226,38 @@ export const mqttPlugin: ChannelPlugin<MqttCoreConfig> = {
 
         // Determine topic: use replyTopicMap to find the real reply topic
         let rawTopic = effectiveTo ?? to ?? "openclaw/outbound";
-        console.log(`[sendMedia] rawTopic before lookup: ${rawTopic}`);
+        console.log(`[sendMedia-DEBUG] rawTopic before lookup: ${rawTopic}, replyTopicMapSize=${replyTopicMap.size}`);
 
-        // If rawTopic looks like a senderId (no / character), look up replyTopicMap
-        if (!rawTopic.includes("/")) {
-          const mapKey = rawTopic.startsWith("mqtt:") ? rawTopic.slice(5) : rawTopic;
-          const storedTopic = replyTopicMap.get(mapKey);
-          if (storedTopic) {
-            rawTopic = storedTopic;
+        // Try to resolve from replyTopicMap:
+        // 1. If rawTopic is a plain senderId (no /), look it up directly
+        // 2. If rawTopic has / but looks like a fallback (senderId/inbound),
+        //    extract the first path segment as senderId and look up
+        const withoutPrefix = rawTopic.startsWith("mqtt:") ? rawTopic.slice(5) : rawTopic;
+        let resolvedTopic: string | undefined;
+
+        if (!withoutPrefix.includes("/")) {
+          // Plain senderId (no /)
+          resolvedTopic = replyTopicMap.get(withoutPrefix);
+          console.log(`[sendMedia-DEBUG] lookup senderId=${withoutPrefix}, found=${resolvedTopic ?? "(not found)"}`);
+        } else {
+          // Has / - extract first segment as candidate senderId
+          const candidateId = withoutPrefix.split("/")[0];
+          if (candidateId) {
+            resolvedTopic = replyTopicMap.get(candidateId);
+            if (resolvedTopic) {
+              console.log(`[sendMedia-DEBUG] resolved fallback ${withoutPrefix} -> ${resolvedTopic} via senderId=${candidateId}`);
+            } else {
+              console.log(`[sendMedia-DEBUG] candidate senderId=${candidateId} not found in replyTopicMap, map keys=${[...replyTopicMap.keys()].join(",")}`);
+            }
           }
         }
 
+        if (resolvedTopic) {
+          rawTopic = resolvedTopic;
+        }
+
         const topic = rawTopic.startsWith("mqtt:") ? rawTopic.slice(5) : rawTopic;
-        console.log(`[sendMedia] final topic: ${topic}`);
+        console.log(`[sendMedia-DEBUG] final topic: ${topic}`);
 
         const senderId = mqtt?.clientId ?? mqttClient?.getClientId() ?? "openclaw";
         const outboundMsg = buildOutboundMessage(senderId, {
@@ -535,26 +568,29 @@ async function handleGroupMessage(opts: {
     // inbound context logging removed
 
     // Dispatch through OpenClaw's reply system and publish replies
+    log?.info?.(`[REPLY-DEBUG] group dispatchReply called, ctxPayload.To=${ctxPayload.To}, ctxPayload.From=${ctxPayload.From}, groupTopic=${groupTopic}, senderId=${senderId}`);
     await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
           deliver: async (payload: { text?: string; media?: any }, info: { kind: string }) => {
+           log?.info?.(`[REPLY-DEBUG] group deliver callback invoked: kind=${info.kind}, hasText=${!!payload.text}, hasMedia=${!!payload.media}, capturedGroupTopic=${groupTopic}, shouldReply=${shouldReply}`);
            if (!shouldReply) {
              log?.info?.(`MQTT: skipping reply for non-targeted message (context only)`);
              return;
            }
            if (!payload.text && !payload.media) {
-            log?.debug?.(`MQTT: skipping empty ${info.kind} group reply`);
-            return;
-          }
+             log?.info?.(`[REPLY-DEBUG] group skipping empty ${info.kind} reply`);
+             return;
+           }
 
-          if (mqttClient?.isConnected()) {
-            try {
-              const myId = mqttClient.getClientId() || "openclaw";
-              const outOpts: Parameters<typeof buildOutboundMessage>[1] = {
-                text: payload.text,
-              };
+           if (mqttClient?.isConnected()) {
+             try {
+               const myId = mqttClient.getClientId() || "openclaw";
+               log?.info?.(`[REPLY-DEBUG] group building outbound message, myId=${myId}, groupTopic=${groupTopic}`);
+               const outOpts: Parameters<typeof buildOutboundMessage>[1] = {
+                 text: payload.text,
+               };
 
               if (msgHadTargetIds) {
                 outOpts.text = `@${senderName} ${payload.text ?? ""}`.trim();
@@ -578,6 +614,7 @@ async function handleGroupMessage(opts: {
                 ...mqttClient.getInitialUserProperties(),
                 reply_to: groupTopic,
               };
+              log?.info?.(`[REPLY-DEBUG] group publishing: topic=${groupTopic}, userProperties.reply_to=${groupTopic}`);
               await mqttClient.publish(groupTopic, outboundPayload, qos as 0 | 1 | 2, userProperties);
               log?.info?.(`MQTT: sent group reply to ${groupTopic}`);
             } catch (err) {
@@ -636,12 +673,16 @@ async function handleInboundMessage(opts: {
       const userProps = packet.properties.userProperties;
       if (userProps.reply_to) {
         replyTopic = userProps.reply_to; // plain topic path from userProperties
+        console.log(`[reply_to-DEBUG] extracted reply_to=${replyTopic} from userProperties`);
       } else {
+        console.log(`[reply_to-DEBUG] no reply_to in userProperties, keys=${Object.keys(userProps).join(",")}`);
         log?.warn?.('MQTT v5.0 message missing required "reply_to" property in userProperties, using default reply topic');
       }
     } else {
+      console.log(`[reply_to-DEBUG] packet.properties or userProperties missing, packetProps=${JSON.stringify(packet?.properties ?? "(none)").slice(0,200)}`);
       log?.warn?.('MQTT message missing properties or userProperties, using default reply topic');
     }
+    console.log(`[reply_to-DEBUG] final replyTopic=${replyTopic}, senderId will be extracted from payload`);
 
     // Parse JSON and attempt MqttMessage format
     let parsedPayload: Record<string, unknown> | null = null;
@@ -807,6 +848,7 @@ async function handleInboundMessage(opts: {
     }
 
     // Store replyTopic BEFORE dispatchReply so resolveTarget can find it
+    console.log(`[replyTopicMap-DEBUG] set senderId=${senderId}, replyTopic=${replyTopic}, mapSize=${replyTopicMap.size + 1}`);
     replyTopicMap.set(senderId, replyTopic);
 
     // Build the inbound context using OpenClaw's standard format
@@ -831,24 +873,27 @@ async function handleInboundMessage(opts: {
     });
 
     // Dispatch through OpenClaw's reply system and publish replies
+    log?.info?.(`[REPLY-DEBUG] dispatchReply called, ctxPayload.To=${ctxPayload.To}, ctxPayload.From=${ctxPayload.From}, replyTopic=${replyTopic}, senderId=${senderId}`);
     await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
         deliver: async (payload: { text?: string; media?: any }, info: { kind: string }) => {
+           log?.info?.(`[REPLY-DEBUG] deliver callback invoked: kind=${info.kind}, hasText=${!!payload.text}, hasMedia=${!!payload.media}, capturedReplyTopic=${replyTopic}, shouldReply=${shouldReply}`);
            if (!shouldReply) {
              log?.info?.(`MQTT: skipping reply for non-targeted group message (context only)`);
              return;
            }
            console.log(`[deliver] called: kind=${info.kind}, hasText=${!!payload.text}, hasMedia=${!!payload.media}, text=${payload.text?.slice(0,80)}`);
            if (!payload.text && !payload.media) {
-             log?.debug?.(`MQTT: skipping empty ${info.kind} reply`);
+             log?.info?.(`[REPLY-DEBUG] skipping empty ${info.kind} reply`);
              return;
            }
 
            if (mqttClient?.isConnected()) {
              try {
                const myId = mqttClient.getClientId() || "openclaw";
+               log?.info?.(`[REPLY-DEBUG] building outbound message, myId=${myId}, replyTopic=${replyTopic}`);
                const outOpts: Parameters<typeof buildOutboundMessage>[1] = {
                  text: payload.text,
                };
@@ -878,6 +923,7 @@ async function handleInboundMessage(opts: {
                 ...mqttClient.getInitialUserProperties(),
                 reply_to: replyTopic,
               };
+              log?.info?.(`[REPLY-DEBUG] publishing: topic=${replyTopic}, userProperties.reply_to=${replyTopic}`);
               await mqttClient.publish(replyTopic, outboundPayload, qos as 0 | 1 | 2, userProperties);
               log?.info?.(`MQTT: sent reply to ${replyTopic}`);
             } catch (err) {
