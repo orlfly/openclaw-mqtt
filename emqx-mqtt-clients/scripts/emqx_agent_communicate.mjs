@@ -491,7 +491,7 @@ async function main() {
       "sender-desc":   { type: "string" },
       agent:           { type: "string" },
       msg:             { type: "string" },
-      timeout:         { type: "string", default: "15" },
+      timeout:         { type: "string", default: "300" },
       qos:             { type: "string", default: "1" },
       filter:          { type: "string" },
       help:            { type: "boolean", default: false },
@@ -534,7 +534,7 @@ Options (send / send-wait):
   --msg             Message text (required)
 
 Options (send-wait):
-  --timeout         Max seconds to wait (default: 15)
+  --timeout         Max seconds to wait (default: 300)
 
 Options (discover):
   --filter          Filter by clientid pattern
