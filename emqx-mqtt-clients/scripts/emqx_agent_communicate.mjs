@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * EMQX Agent Communication & Task Distribution Tool (MQTT.js)
+ * EMQX Agent Communication Tool (MQTT.js)
  *
  * Follows the mqtt-chat app conventions exactly:
  *   - MQTT v5 with userProperties for sender identity
- *   - Message JSON: {id, text, senderId, timestamp, type, ...}
+ *   - Message JSON: {id, text, senderId, timestamp, type}
  *   - Private messages: publish to {targetClientId}/inbound
  *   - Inbox subscription: {ownClientId}/inbound
  *   - Reply routing via userProperty reply_to = {senderId}/inbound
@@ -12,8 +12,8 @@
  * Commands:
  *   discover          List agents with inbound topic details (HTTP API)
  *   subs <clientid>   Show agent subscriptions (HTTP API)
- *   send              Send message/task via MQTT v5 (fire and forget)
- *   send-wait         Send task + wait for reply (blocking with timeout)
+ *   send              Send message via MQTT v5 (fire and forget)
+ *   send-wait         Send message + wait for reply (blocking with timeout)
  *   listen            Listen on {senderId}/inbound for incoming messages
  *
  * Usage:
@@ -21,8 +21,7 @@
  *   node emqx_agent_communicate.mjs discover --filter "openclaw-"
  *   node emqx_agent_communicate.mjs subs openclaw-doc
  *   node emqx_agent_communicate.mjs send --agent openclaw-doc --msg "Hello"
- *   node emqx_agent_communicate.mjs send --agent openclaw-doc --task status
- *   node emqx_agent_communicate.mjs send-wait --agent openclaw-doc --task status --timeout 30
+ *   node emqx_agent_communicate.mjs send-wait --agent openclaw-doc --msg "汇报状态" --timeout 30
  *   node emqx_agent_communicate.mjs listen
  *
  * Environment:
@@ -112,14 +111,6 @@ async function getSubscriptions(host, port, apiKey, apiSecret, clientid) {
 
 // ── Message format (mqtt-chat compatible) ──────────────────────────────
 
-const TASK_TEMPLATES = {
-  status: "请汇报当前状态",
-  health: "请检查系统健康状态 (CPU/内存/磁盘/运行时间)",
-  inventory: "请列出可用资源清单",
-  ping: "ping",
-  custom: "",
-};
-
 /**
  * Build a JSON message following mqtt-chat convention.
  * Format: { id, text, senderId, timestamp, type }
@@ -132,17 +123,6 @@ function buildMessage(text, senderId, msgType = "text") {
     timestamp: isoNow(),
     type: msgType,
   });
-}
-
-/**
- * Build a task message — just plain text, no kind/action/payload fields.
- * The text content carries all task semantics naturally.
- */
-function buildTaskPayload(taskName, senderId, params = {}, fallbackMsg = "") {
-  const template = TASK_TEMPLATES[taskName] || "";
-  const extra = params.text || fallbackMsg || "";
-  const text = [template, extra].filter(Boolean).join(": ");
-  return buildMessage(text, senderId);
 }
 
 function resolveInboundTopic(agentId) {
@@ -311,14 +291,9 @@ async function cmdSend(args) {
   const senderDesc = args.senderDesc || DEFAULT_SENDER_DESC;
 
   const targetTopic = resolveInboundTopic(args.agent);
-  const replyTo     = resolveInboundTopic(senderId);   // mqtt-chat convention
+  const replyTo     = resolveInboundTopic(senderId);
 
-  let payload;
-  if (args.task) {
-    payload = buildTaskPayload(args.task, senderId, args.params, args.msg);
-  } else {
-    payload = buildMessage(args.msg || "", senderId);
-  }
+  const payload = buildMessage(args.msg, senderId);
 
   const userProperties = buildUserProperties(senderId, senderName, senderEmoji, senderDesc, replyTo);
 
@@ -346,17 +321,13 @@ async function cmdSend(args) {
 }
 
 /**
- * send-wait — Send task via MQTT v5, wait for reply (blocking).
+ * send-wait — Send message via MQTT v5, wait for reply (blocking).
  *
- * Creates a unique reply topic, subscribes to it, publishes the task with
+ * Creates a unique reply topic, subscribes to it, publishes the message with
  * reply_to set to the unique topic, then blocks until a reply arrives or
  * timeout expires.
  *
- * This mode is specifically designed for cross-channel scenarios where
- * an agent in one channel (e.g. QQ Bot) needs to query an MQTT agent
- * and get the response back synchronously.
- *
- * Reply is printed as JSON to stdout. On timeout, exits with code 1.
+ * Reply is printed to stdout. On timeout, exits with code 1.
  */
 async function cmdSendWait(args) {
   const mqttHost = args.emqxMqttHost || args.host;
@@ -370,7 +341,7 @@ async function cmdSendWait(args) {
   const targetTopic = resolveInboundTopic(args.agent);
   const replyTopic  = `agent-reply/${shortId(16)}`;
 
-  const payload = buildTaskPayload(args.task, senderId, args.params);
+  const payload = buildMessage(args.msg, senderId);
   const userProperties = buildUserProperties(senderId, senderName, senderEmoji, senderDesc, replyTopic);
 
   const client = await createMqttClient(mqttHost, mqttPort, args.timeout);
@@ -503,10 +474,6 @@ async function cmdListen(args) {
   });
 }
 
-// ── Task template names for help text ──────────────────────────────────
-
-const TASK_NAMES = Object.keys(TASK_TEMPLATES).join(", ");
-
 // ── Main ──────────────────────────────────────────────────────────────
 
 async function main() {
@@ -524,8 +491,6 @@ async function main() {
       "sender-desc":   { type: "string" },
       agent:           { type: "string" },
       msg:             { type: "string" },
-      task:            { type: "string" },
-      params:          { type: "string" },
       timeout:         { type: "string", default: "15" },
       qos:             { type: "string", default: "1" },
       filter:          { type: "string" },
@@ -541,13 +506,13 @@ async function main() {
     console.log(`EMQX Agent Communication Tool (MQTT.js / mqtt-chat protocol)
 
 Commands:
-  discover                      List agents with inbound topic details
-  subs <clientid>               Show agent subscriptions
-  send --agent <id> [--msg <text> | --task <name>] [--params <json>]
-                                Fire-and-forget publish via MQTT v5
-  send-wait --agent <id> --task <name> [--params <json>] [--timeout <s>]
-                                Send task + wait for reply (blocking)
-  listen                        Listen on {senderId}/inbound for incoming messages
+  discover                    List agents with inbound topic details
+  subs <clientid>             Show agent subscriptions
+  send --agent <id> --msg <text>
+                              Fire-and-forget publish via MQTT v5
+  send-wait --agent <id> --msg <text> [--timeout <s>]
+                              Send message + wait for reply (blocking)
+  listen                      Listen on {senderId}/inbound
 
 Options (all commands):
   --host            EMQX host (env: EMQX_HOST)
@@ -566,9 +531,7 @@ Options (send / send-wait / listen):
 
 Options (send / send-wait):
   --agent           Target agent client ID (required)
-  --msg             Plain text message
-  --task            Task type: ${TASK_NAMES}
-  --params          JSON params for custom task
+  --msg             Message text (required)
 
 Options (send-wait):
   --timeout         Max seconds to wait (default: 15)
@@ -580,8 +543,7 @@ Examples:
   node emqx_agent_communicate.mjs discover --filter "openclaw-"
   node emqx_agent_communicate.mjs subs openclaw-doc
   node emqx_agent_communicate.mjs send --agent openclaw-doc --msg "Hello"
-  node emqx_agent_communicate.mjs send --agent openclaw-doc --task status
-  node emqx_agent_communicate.mjs send-wait --agent openclaw-doc --task status --timeout 30
+  node emqx_agent_communicate.mjs send-wait --agent openclaw-doc --msg "汇报状态" --timeout 30
   node emqx_agent_communicate.mjs listen`);
     return;
   }
@@ -594,17 +556,6 @@ Examples:
   args.emqxMqttPort = parseInt(args["emqx-mqtt-port"] || getEnv("EMQX_MQTT_PORT") || "1883", 10);
   args.timeout     = parseInt(args.timeout, 10);
   args.qos         = parseInt(args.qos, 10);
-
-  if (args.params) {
-    try {
-      args.params = JSON.parse(args.params);
-    } catch (e) {
-      console.error(`Invalid JSON in --params: ${e.message}`);
-      process.exit(1);
-    }
-  } else {
-    args.params = {};
-  }
 
   switch (command) {
     case "discover":
@@ -619,22 +570,22 @@ Examples:
     }
     case "send": {
       if (!args.agent) {
-        console.error("--agent is required for send.");
+        console.error("--agent is required.");
         process.exit(1);
       }
-      if (!args.msg && !args.task) {
-        console.error("Either --msg or --task is required.");
+      if (!args.msg) {
+        console.error("--msg is required.");
         process.exit(1);
       }
       return cmdSend(args);
     }
     case "send-wait": {
       if (!args.agent) {
-        console.error("--agent is required for send-wait.");
+        console.error("--agent is required.");
         process.exit(1);
       }
-      if (!args.task) {
-        console.error("--task is required for send-wait.");
+      if (!args.msg) {
+        console.error("--msg is required.");
         process.exit(1);
       }
       return cmdSendWait(args);

@@ -348,10 +348,12 @@ export EMQX_SENDER_NAME="马龙 🛠️"
 export EMQX_SENDER_EMOJI="🛠️"
 export EMQX_SENDER_DESC="开发管理"
 
-# MQTT 认证（可选）
-export EMQX_MQTT_USERNAME=""
-export EMQX_MQTT_PASSWORD=""
+# MQTT 认证（可选，EMQX 启用了认证则必填）
+export EMQX_MQTT_USERNAME="web"
+export EMQX_MQTT_PASSWORD="web"
 ```
+
+> **MQTT 认证**：如果 EMQX 启用了用户名/密码认证（Dashboard → 访问控制 → 认证），必须设置 `EMQX_MQTT_USERNAME` 和 `EMQX_MQTT_PASSWORD`，否则连接会被拒绝（`Bad User Name or Password`）。
 
 **方式二：`.env` 文件**
 
@@ -371,9 +373,9 @@ EMQX_SENDER_NAME=马龙 🛠️
 EMQX_SENDER_EMOJI=🛠️
 EMQX_SENDER_DESC=开发管理
 
-# MQTT 认证（可选）
-EMQX_MQTT_USERNAME=
-EMQX_MQTT_PASSWORD=
+# MQTT 认证（可选，EMQX 启用了认证则必填）
+EMQX_MQTT_USERNAME=web
+EMQX_MQTT_PASSWORD=web
 ```
 
 **方式三：交互式向导**
@@ -407,28 +409,13 @@ node emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send \
 
 # 发送并等待回复（阻塞）
 node emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \
-  --agent openclaw-doc --task status --timeout 30
-
-# 自定义任务
-node emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \
-  --agent openclaw-doc --task custom \
-  --params '{"text": "写一份mqtt报告"}' --timeout 60
+  --agent openclaw-doc --msg "请汇报状态" --timeout 30
 ```
 
 **调试监听：**
 ```bash
 node emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs listen
 ```
-
-### 任务类型
-
-| 任务 | 文本内容 |
-|------|---------|
-| `ping` | `ping` |
-| `status` | `请汇报当前状态` |
-| `health` | `请检查系统健康状态 (CPU/内存/磁盘/运行时间)` |
-| `inventory` | `请列出可用资源清单` |
-| `custom` | 用户自定义（通过 `--msg` 或 `--params`） |
 
 ### 跨渠道场景
 

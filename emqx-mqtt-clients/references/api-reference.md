@@ -164,29 +164,6 @@ reply_to:     Reply routing address
 
 ---
 
-## Task Types
-
-Tasks are sent as plain `text` messages. The text content carries all semantics:
-
-| Task | Text sent |
-|------|-----------|
-| `ping` | `ping` |
-| `status` | `请汇报当前状态` |
-| `health` | `请检查系统健康状态 (CPU/内存/磁盘/运行时间)` |
-| `inventory` | `请列出可用资源清单` |
-| `custom` | User-defined message (via `--msg` or `--params`) |
-
-Custom tasks with `--params '{"text": "写一份mqtt报告"}'` produce:
-```json
-{
-  "id": "a1b2c3d4e5f6",
-  "text": "写一份mqtt报告",
-  "senderId": "openclaw-malong",
-  "timestamp": "2026-05-24T21:22:00.000Z",
-  "type": "text"
-}
-```
-
 ---
 
 ## Error Codes

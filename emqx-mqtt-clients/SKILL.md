@@ -133,7 +133,7 @@ Sends a task with `reply_to` in userProperties, subscribes to that topic and blo
 
 ```bash
 node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \
-  --agent openclaw-doc --task status --timeout 30
+  --agent openclaw-doc --msg "请汇报状态" --timeout 30
 ```
 
 The agent receives the task with:
@@ -145,9 +145,6 @@ The agent receives the task with:
 ```bash
 node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send \
   --agent openclaw-doc --msg "请检查系统状态"
-
-node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send \
-  --agent openclaw-doc --task health
 ```
 
 ### Custom tasks with parameters
@@ -183,10 +180,10 @@ node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send \
 The core pattern for routing MQTT agent replies back to QQ Bot:
 
 ```
-# Step 1: Send task with send-wait, get the reply JSON
+# Step 1: Send message with send-wait, get the reply
 reply_json = exec("""
   node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \\
-    --agent openclaw-doc --task status --timeout 30
+    --agent openclaw-doc --msg "汇报状态" --timeout 30
 """)
 
 # Step 2: Forward reply to QQ Bot user
@@ -217,8 +214,8 @@ User sees reply in QQ Bot
 ```
 # 1. User asks in QQ Bot: "看看 openclaw-doc 的状态"
 
-# 2. Send task and wait for reply via MQTT
-reply = exec("node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait --agent openclaw-doc --task status --timeout 15")
+# 2. Send message and wait for reply via MQTT
+reply = exec("node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait --agent openclaw-doc --msg '汇报状态' --timeout 15")
 
 # 3. Check if we got a reply
 if "No reply received" in reply:
@@ -297,8 +294,8 @@ Sender (openclaw-malong)               EMQX Broker                  Recipient (a
 | `emqx_list_clients.mjs` | — | Discover agents, watch presence, list endpoints |
 | `emqx_agent_communicate.mjs` | `discover` | List agents with inbound topic details |
 | | `subs <clientid>` | Check agent subscriptions |
-| | `send --agent <id>` | Fire-and-forget message/task |
-| | `send-wait --agent <id>` | Send task + wait for reply (blocking) |
+| | `send --agent <id> --msg <text>` | Fire-and-forget message |
+| | `send-wait --agent <id> --msg <text>` | Send + wait for reply (blocking) |
 | | `listen` | Listen on own inbox for debugging |
 
 ---
@@ -311,32 +308,4 @@ Sender (openclaw-malong)               EMQX Broker                  Recipient (a
 | Outbound (send) | `{targetClientId}/inbound` | `openclaw-malong/inbound` |
 | Reply (send-wait) | `agent-reply/{uuid}` | `agent-reply/a1b2c3d4e5f6` |
 | Group chat | `group_{name}/bound` | `group_dev/bound` |
-
----
-
-## Task Types
-
-Tasks are plain text messages. Each task template maps to a human-readable text:
-
-| Task | Text Content |
-|------|-------------|
-| `ping` | `ping` |
-| `status` | `请汇报当前状态` |
-| `health` | `请检查系统健康状态 (CPU/内存/磁盘/运行时间)` |
-| `inventory` | `请列出可用资源清单` |
-| `custom` | User-specified (via `--msg` or `--params`) |
-
-Custom tasks:
-```bash
-# Direct message
-node emqx_agent_communicate.mjs send --agent openclaw-doc --msg "写一份mqtt报告"
-
-# Via --params
-node emqx_agent_communicate.mjs send --agent openclaw-doc --task custom \
-  --params '{"text": "写一份mqtt报告"}'
-
-# With send-wait
-node emqx_agent_communicate.mjs send-wait --agent openclaw-doc --task custom \
-  --params '{"text": "写一份mqtt报告"}' --timeout 60
-```
 
