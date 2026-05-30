@@ -296,6 +296,156 @@ File size limit: **10MB**. Larger files are rejected.
 
 ## Security
 
+## EMQX MQTT Clients Skill
+
+项目内置 `emqx-mqtt-clients/` 技能，用于在运行时发现和管理接入 EMQX broker 的其他 MQTT agent，遵循 [mqtt-chat](https://github.com/anomalyco/mqtt-chat) 的私聊协议。
+
+### 概述
+
+| 脚本 | 功能 |
+|------|------|
+| `emqx_list_clients.mjs` | 发现 agent、监控上下线、查看连接端点 |
+| `emqx_agent_communicate.mjs` | 发送消息/任务、等待回复、监听 inbox |
+
+底层使用 **MQTT.js v5** 实现，消息格式与 mqtt-chat 完全兼容。
+
+### Wire Protocol
+
+```
+每个 agent 订阅: {ownClientId}/inbound
+发送私聊消息:    publish to {targetClientId}/inbound
+回复路由:        MQTT v5 userProperties.reply_to
+```
+
+发送时携带的 userProperties：
+```
+name:        Display name
+emoji:       Avatar emoji  
+description: Role
+reply_to:    {senderId}/inbound
+```
+
+消息体为纯 JSON：
+```json
+{"id":"...", "text":"message", "senderId":"...", "timestamp":"...", "type":"text"}
+```
+
+### 配置
+
+**方式一：export 环境变量**
+
+```bash
+# EMQX 连接
+export EMQX_HOST="192.168.106.121"
+export EMQX_MQTT_PORT="1883"
+export EMQX_API_PORT="18083"
+export EMQX_API_KEY="<api-key-id>"
+export EMQX_API_SECRET="<api-secret-key>"
+
+# Agent 身份
+export EMQX_SENDER_ID="openclaw-malong"
+export EMQX_SENDER_NAME="马龙 🛠️"
+export EMQX_SENDER_EMOJI="🛠️"
+export EMQX_SENDER_DESC="开发管理"
+
+# MQTT 认证（可选）
+export EMQX_MQTT_USERNAME=""
+export EMQX_MQTT_PASSWORD=""
+```
+
+**方式二：`.env` 文件**
+
+创建 `~/.openclaw/workspace/.env`：
+
+```
+# EMQX 连接
+EMQX_HOST=192.168.106.121
+EMQX_MQTT_PORT=1883
+EMQX_API_PORT=18083
+EMQX_API_KEY=<api-key-id>
+EMQX_API_SECRET=<api-secret-key>
+
+# Agent 身份
+EMQX_SENDER_ID=openclaw-malong
+EMQX_SENDER_NAME=马龙 🛠️
+EMQX_SENDER_EMOJI=🛠️
+EMQX_SENDER_DESC=开发管理
+
+# MQTT 认证（可选）
+EMQX_MQTT_USERNAME=
+EMQX_MQTT_PASSWORD=
+```
+
+**方式三：交互式向导**
+
+```bash
+bash emqx-mqtt-clients/scripts/setup.sh
+```
+
+### 使用
+
+**发现 agent：**
+```bash
+# 列出所有在线 agent
+node emqx-mqtt-clients/scripts/emqx_list_clients.mjs
+
+# 带 inbound topic 信息
+node emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs discover --filter "openclaw-"
+
+# 查看 agent 订阅
+node emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs subs openclaw-doc
+
+# 监控上下线
+node emqx-mqtt-clients/scripts/emqx_list_clients.mjs --watch
+```
+
+**任务分派：**
+```bash
+# 发送消息（fire-and-forget）
+node emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send \
+  --agent openclaw-doc --msg "请汇报状态"
+
+# 发送并等待回复（阻塞）
+node emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \
+  --agent openclaw-doc --task status --timeout 30
+
+# 自定义任务
+node emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \
+  --agent openclaw-doc --task custom \
+  --params '{"text": "写一份mqtt报告"}' --timeout 60
+```
+
+**调试监听：**
+```bash
+node emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs listen
+```
+
+### 任务类型
+
+| 任务 | 文本内容 |
+|------|---------|
+| `ping` | `ping` |
+| `status` | `请汇报当前状态` |
+| `health` | `请检查系统健康状态 (CPU/内存/磁盘/运行时间)` |
+| `inventory` | `请列出可用资源清单` |
+| `custom` | 用户自定义（通过 `--msg` 或 `--params`） |
+
+### 跨渠道场景
+
+```
+QQ Bot 用户 ──→ agent ──→ send-wait → MQTT agent
+                                        ↓
+agent ←── 回复 ────────────────── MQTT agent
+   ↓
+QQ Bot 用户 ←── forward
+```
+
+发送时用 `send-wait`，收到回复后通过 `message(channel="qqbot", ...)` 转发。
+
+---
+
+## Security
+
 **Important:** Any client that can publish to the inbound topic has full access to your OpenClaw agent. Treat MQTT as a **trusted channel only** (restricted broker, auth, private network).
 
 Key security considerations:

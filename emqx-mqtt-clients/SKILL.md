@@ -28,6 +28,13 @@ Uses **MQTT.js** (Node.js) with the **mqtt-chat** wire protocol for full interop
 | API Key ID | `EMQX_API_KEY` | API 认证凭据 ID |
 | API Key Secret | `EMQX_API_SECRET` | API 认证凭据密钥 |
 
+**MQTT 认证（可选）：**
+
+| 配置项 | 环境变量 | 说明 |
+|--------|---------|------|
+| MQTT 用户名 | `EMQX_MQTT_USERNAME` | MQTT 连接用户名 |
+| MQTT 密码 | `EMQX_MQTT_PASSWORD` | MQTT 连接密码 |
+
 **Agent 身份：**
 
 | 配置项 | 环境变量 | 说明 |
@@ -63,6 +70,10 @@ export EMQX_MQTT_PORT="1883"
 export EMQX_API_PORT="18083"
 export EMQX_API_KEY="<api-key-id>"
 export EMQX_API_SECRET="<api-secret-key>"
+
+# MQTT 认证（可选）
+export EMQX_MQTT_USERNAME=""
+export EMQX_MQTT_PASSWORD=""
 
 # Agent 身份
 export EMQX_SENDER_ID="openclaw-malong"
@@ -142,11 +153,19 @@ node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send \
 ### Custom tasks with parameters
 
 ```bash
+node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send \
+  --agent openclaw-doc --task custom --params '{"text": "写一份mqtt报告"}'
+
 node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \
   --agent openclaw-doc --task custom \
-  --params '{"action": "report", "level": "full"}' \
-  --timeout 30
+  --params '{"text": "写一份mqtt报告"}' \
+  --timeout 60
 ```
+
+Or simply use `--msg` with `--task custom`:
+```bash
+node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send \
+  --agent openclaw-doc --task custom --msg "写一份mqtt报告"
 
 ### Identity customization
 
