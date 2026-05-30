@@ -7,12 +7,10 @@ description: Discover MQTT agents connected to an EMQX broker, check agent prese
 
 Discover MQTT-connected agents on EMQX, communicate with them, and route replies across channels.
 
----
-
-## 安装设置（Installation & Setup）
+Uses **MQTT.js** (Node.js) with the **mqtt-chat** wire protocol for full interoperability.
 
 > [!NOTE]
-> API Key 需要 **administrator** 或 **viewer** 角色。
+> API Key needs **administrator** or **viewer** role.
 
 ---
 
@@ -39,11 +37,7 @@ Discover MQTT-connected agents on EMQX, communicate with them, and route replies
 | 头像 Emoji | `EMQX_SENDER_EMOJI` | 如 `🛠️` |
 | 描述/角色 | `EMQX_SENDER_DESC` | 如 `开发管理` |
 
-**消息订阅：**
-
-| 配置项 | 环境变量 | 说明 |
-|--------|---------|------|
-| 订阅 Topic | `EMQX_SUBSCRIBE_TOPIC` | 接收消息的 topic，默认 `{senderId}/inbound` |
+> **依赖**: 需要 `mqtt` npm 包。如果项目根目录已有 `node_modules/mqtt`，无需额外安装。
 
 ---
 
@@ -75,9 +69,6 @@ export EMQX_SENDER_ID="openclaw-malong"
 export EMQX_SENDER_NAME="马龙 🛠️"
 export EMQX_SENDER_EMOJI="🛠️"
 export EMQX_SENDER_DESC="开发管理"
-
-# 消息订阅
-export EMQX_SUBSCRIBE_TOPIC="openclaw-malong/inbound"
 ```
 
 ### 方式三：`.env` 文件
@@ -91,7 +82,7 @@ export EMQX_SUBSCRIBE_TOPIC="openclaw-malong/inbound"
 ```bash
 cd ~/.openclaw/workspace
 set -a; source .env 2>/dev/null; set +a
-python3 skills/emqx-mqtt-clients/scripts/emqx_list_clients.py
+node skills/emqx-mqtt-clients/scripts/emqx_list_clients.mjs
 ```
 
 显示 agent 列表即配置成功。
@@ -103,20 +94,20 @@ python3 skills/emqx-mqtt-clients/scripts/emqx_list_clients.py
 ### List all connected agents
 
 ```bash
-python3 skills/emqx-mqtt-clients/scripts/emqx_list_clients.py
+node skills/emqx-mqtt-clients/scripts/emqx_list_clients.mjs
 ```
 
 ### Discover with inbound topic info
 
 ```bash
-python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py discover
-python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py discover --filter "openclaw-"
+node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs discover
+node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs discover --filter "openclaw-"
 ```
 
 ### Check agent's subscribed topics
 
 ```bash
-python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py subs openclaw-doc
+node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs subs openclaw-doc
 ```
 
 ---
@@ -130,7 +121,7 @@ Uses MQTT v5 userProperties to carry sender identity and reply routing.
 Sends a task with `reply_to` in userProperties, subscribes to that topic and blocks until the agent replies.
 
 ```bash
-python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py send-wait \
+node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \
   --agent openclaw-doc --task status --timeout 30
 ```
 
@@ -141,17 +132,17 @@ The agent receives the task with:
 ### Fire & Forget
 
 ```bash
-python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py send \
+node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send \
   --agent openclaw-doc --msg "请检查系统状态"
 
-python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py send \
+node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send \
   --agent openclaw-doc --task health
 ```
 
 ### Custom tasks with parameters
 
 ```bash
-python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py send-wait \
+node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \
   --agent openclaw-doc --task custom \
   --params '{"action": "report", "level": "full"}' \
   --timeout 30
@@ -161,7 +152,7 @@ python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py send-wait \
 
 ```bash
 # Override sender identity per-command
-python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py send \
+node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send \
   --agent openclaw-doc --msg "hello" \
   --sender-name "马龙 🛠️" --sender-emoji "🛠️" --sender-desc "开发管理"
 ```
@@ -172,10 +163,10 @@ python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py send \
 
 The core pattern for routing MQTT agent replies back to QQ Bot:
 
-```python
-# Step 1: Send task with reply_wait, get the reply payload
+```
+# Step 1: Send task with send-wait, get the reply JSON
 reply_json = exec("""
-  python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py send-wait \\
+  node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \\
     --agent openclaw-doc --task status --timeout 30
 """)
 
@@ -204,11 +195,11 @@ User sees reply in QQ Bot
 
 ### Workflow: From any channel to MQTT and back
 
-```python
+```
 # 1. User asks in QQ Bot: "看看 openclaw-doc 的状态"
 
 # 2. Send task and wait for reply via MQTT
-reply = exec("python3 skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.py send-wait --agent openclaw-doc --task status --timeout 15")
+reply = exec("node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait --agent openclaw-doc --task status --timeout 15")
 
 # 3. Check if we got a reply
 if "No reply received" in reply:
@@ -221,46 +212,62 @@ else:
 
 ## MQTT v5 Protocol & Message Format (mqtt-chat compatible)
 
-The script follows the mqtt-chat app conventions for full interoperability.
+The scripts follow the **mqtt-chat app conventions** exactly for full interoperability.
 
 ### Wire Protocol
 
 - **MQTT version**: v5
-- **Topic**: `{targetClientId}/inbound` (private messages)
+- **MQTT.js client**: `import mqtt from "mqtt"`
+- **Topic**: `{targetClientId}/inbound` (private messages, push-to-inbox model)
+- **Inbox subscription**: `{ownClientId}/inbound` (each agent subscribes to its own inbox)
 - **userProperties**: Sender identity & reply routing
 
 ### userProperties (MQTT v5 header)
 
+Every PUBLISH packet carries:
+
 ```
-name: 马龙 🛠️
-emoji: 🛠️
-description: 开发管理
-reply_to: openclaw-malong/inbound
+name:        马龙 🛠️        (sender display name)
+emoji:       🛠️              (sender avatar)
+description: 开发管理          (sender role/tagline)
+reply_to:    openclaw-malong/inbound   (where to send replies)
 ```
 
-The receiver uses these to identify the sender and knows where to reply.
+The receiver discovers the sender's identity from userProperties — no separate registration needed.
 
 ### Message Body (JSON)
 
 ```json
 {
   "id": "a1b2c3d4e5f6",
-  "text": "Request agent status report",
+  "text": "请汇报当前状态",
   "senderId": "openclaw-malong",
-  "timestamp": "2026-05-24T21:22:00.000000",
-  "type": "text",
-  "kind": "task",
-  "action": "status_report",
-  "task_name": "status",
-  "description": "Request agent status report",
-  "reply_to": {
-    "topic": "agent-reply/a1b2c3d4e5f6"
-  },
-  "payload": {}
+  "timestamp": "2026-05-24T21:22:00.000Z",
+  "type": "text"
 }
 ```
 
-This is the same format used by the MQTT Chat app, so agents built for that app can respond to tasks from this tool.
+Task messages are plain text — no extra fields. The receiving agent reads `text` and responds accordingly.
+
+### Private Chat Flow (mqtt-chat convention)
+
+```
+Sender (openclaw-malong)               EMQX Broker                  Recipient (agent-001)
+       |                                    |                              |
+       | PUBLISH to "agent-001/inbound":    |                              |
+       | {                                  |                              |
+       |   id:"abc", text:"Hello",         |                              |
+       |   senderId:"openclaw-malong",     |                              |
+       |   timestamp:..., type:"text"      |                              |
+       | }                                  |                              |
+       | userProperties:                    |                              |
+       |  {name:"马龙", emoji:"🛠️",        |                              |
+       |   reply_to:"openclaw-malong/inbound"}  →   delivers to inbox →  |
+       |                                    |                              |
+       |  ←  agent-001 replies to          |  PUBLISH to                  |
+       |      "openclaw-malong/inbound"    ←  "openclaw-malong/inbound"  |
+       |      with own userProperties      |                              |
+```
 
 ---
 
@@ -268,11 +275,12 @@ This is the same format used by the MQTT Chat app, so agents built for that app 
 
 | Script | Commands | Purpose |
 |--------|----------|---------|
-| `emqx_list_clients.py` | — | Discover agents, watch presence, list endpoints |
-| `emqx_agent_communicate.py` | `subs` | Check agent subscriptions |
-| | `send` | Fire-and-forget message/task |
-| | `send-wait` | Send task + wait for reply (blocking) |
-| | `discover` | List agents with inbound topic details |
+| `emqx_list_clients.mjs` | — | Discover agents, watch presence, list endpoints |
+| `emqx_agent_communicate.mjs` | `discover` | List agents with inbound topic details |
+| | `subs <clientid>` | Check agent subscriptions |
+| | `send --agent <id>` | Fire-and-forget message/task |
+| | `send-wait --agent <id>` | Send task + wait for reply (blocking) |
+| | `listen` | Listen on own inbox for debugging |
 
 ---
 
@@ -281,4 +289,35 @@ This is the same format used by the MQTT Chat app, so agents built for that app 
 | Direction | Topic Pattern | Example |
 |-----------|---------------|---------|
 | Inbound (receive) | `{clientid}/inbound` | `openclaw-doc/inbound` |
-| Reply (response) | `reply_to` in userProperties + body | `openclaw-malong/inbound` / `agent-reply/a1b2c3d4e5f6` |
+| Outbound (send) | `{targetClientId}/inbound` | `openclaw-malong/inbound` |
+| Reply (send-wait) | `agent-reply/{uuid}` | `agent-reply/a1b2c3d4e5f6` |
+| Group chat | `group_{name}/bound` | `group_dev/bound` |
+
+---
+
+## Task Types
+
+Tasks are plain text messages. Each task template maps to a human-readable text:
+
+| Task | Text Content |
+|------|-------------|
+| `ping` | `ping` |
+| `status` | `请汇报当前状态` |
+| `health` | `请检查系统健康状态 (CPU/内存/磁盘/运行时间)` |
+| `inventory` | `请列出可用资源清单` |
+| `custom` | User-specified (via `--msg` or `--params`) |
+
+Custom tasks:
+```bash
+# Direct message
+node emqx_agent_communicate.mjs send --agent openclaw-doc --msg "写一份mqtt报告"
+
+# Via --params
+node emqx_agent_communicate.mjs send --agent openclaw-doc --task custom \
+  --params '{"text": "写一份mqtt报告"}'
+
+# With send-wait
+node emqx_agent_communicate.mjs send-wait --agent openclaw-doc --task custom \
+  --params '{"text": "写一份mqtt报告"}' --timeout 60
+```
+

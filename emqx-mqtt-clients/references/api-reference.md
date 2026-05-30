@@ -66,7 +66,7 @@ Parameters:
 
 Send MQTT messages from any incoming channel (QQ Bot, WebChat, etc.).
 
-```python
+```
 message(action="send", channel="mqtt", target="group:{topic}", message="...")
 ```
 
@@ -79,15 +79,17 @@ Parameters:
 
 ## MQTT v5 Protocol Details
 
-### Connection
+### Connection (MQTT.js)
+- Library: `mqtt` (npm package)
 - Protocol: MQTT v5
-- Port: 1883 (TCP) / 8083 (WebSocket)
-- Client ID: Unique per agent
+- Port: 1883 (TCP)
+- Client ID: Unique per agent (auto-generated with prefix)
 - No auth by default (configurable in EMQX)
 
 ### Publish Properties (userProperties)
 
-MQTT v5 user properties carry sender metadata:
+MQTT v5 user properties carry sender metadata — this is the agent identity/registration mechanism from mqtt-chat:
+
 ```
 name:        Display name (e.g. "马龙 🛠️")
 emoji:       Avatar emoji (e.g. "🛠️")
@@ -102,29 +104,31 @@ reply_to:    Where to send replies (e.g. "openclaw-malong/inbound")
 | MQTT v5 userProperties | Sender identity, reply routing |
 | JSON body payload | Message content, task details |
 
-Reply routing is userProperties-only. The body does not carry `reply_to`.
+Reply routing is in userProperties. The body does not carry `reply_to`.
 
 ### mqtt-chat Compatibility
 
-Messages sent by this script are fully compatible with the MQTT Chat app:
+Messages sent by the scripts are fully compatible with the MQTT Chat app:
 - Same JSON structure (`id`, `text`, `senderId`, `timestamp`, `type`)
 - Same userProperties (`name`, `emoji`, `description`, `reply_to`)
 - Same topic conventions (`{clientId}/inbound`)
 - Same MQTT v5 protocol
+- Same push-to-inbox model
 
 ---
 
-## Agent Communication Convention (MQTT v5)
+## Agent Communication Convention (MQTT v5 / mqtt-chat)
 
-This follows the mqtt-chat app conventions.
+This follows the mqtt-chat app conventions exactly.
 
 ### Topic Patterns
 
 | Direction | Topic Pattern | Example |
 |-----------|---------------|---------|
 | Inbound (receive) | `{clientid}/inbound` | `openclaw-doc/inbound` |
+| Outbound (send) | `{target}/inbound` | `openclaw-malong/inbound` |
 | Group chat | `group_{name}/bound` | `group_dev/bound` |
-| Reply (response) | Dynamic via `reply_to` | `openclaw-malong/inbound` |
+| Reply (send-wait) | `agent-reply/{uuid}` | `agent-reply/a1b2c3` |
 
 ### MQTT v5 userProperties
 
@@ -134,14 +138,14 @@ Every publish carries sender identity in user properties:
 name:         Display name
 emoji:        Avatar emoji
 description:  Role/tagline
-reply_to:     {senderId}/inbound  (reply routing)
+reply_to:     Reply routing address
 ```
 
 ### Message JSON Format
 
 ```json
 {
-  "id": "<uuid>",
+  "id": "<uuid-short>",
   "text": "message text",
   "senderId": "<client-id>",
   "timestamp": "<ISO-8601>",
@@ -150,39 +154,38 @@ reply_to:     {senderId}/inbound  (reply routing)
 }
 ```
 
+### Private Chat Flow
+
+1. Each agent subscribes to `{ownClientId}/inbound`
+2. To send a private message, publish to `{targetClientId}/inbound`
+3. Include `{name, emoji, description, reply_to}` in MQTT v5 userProperties
+4. Recipient discovers sender identity from userProperties in the received packet
+5. Recipient replies by publishing to the `reply_to` address
+
 ---
 
-## Task Payload Formats
+## Task Types
 
-### Built-in Task Types
+Tasks are sent as plain `text` messages. The text content carries all semantics:
 
-| Task | Action | Description |
-|------|--------|-------------|
-| `ping` | ping | Connectivity test |
-| `status` | status_report | Request status report |
-| `health` | health_check | Health check (CPU, memory, disk, uptime) |
-| `inventory` | inventory | Inventory report |
-| `custom` | custom | User-defined task |
+| Task | Text sent |
+|------|-----------|
+| `ping` | `ping` |
+| `status` | `请汇报当前状态` |
+| `health` | `请检查系统健康状态 (CPU/内存/磁盘/运行时间)` |
+| `inventory` | `请列出可用资源清单` |
+| `custom` | User-defined message (via `--msg` or `--params`) |
 
-Generic JSON structure (extends the chat message format):
+Custom tasks with `--params '{"text": "写一份mqtt报告"}'` produce:
 ```json
 {
   "id": "a1b2c3d4e5f6",
-  "text": "Request agent status report",
+  "text": "写一份mqtt报告",
   "senderId": "openclaw-malong",
-  "timestamp": "...",
-  "type": "text",
-  "kind": "task",
-  "action": "<action_name>",
-  "task_name": "<task_type>",
-  "description": "<human_description>",
-  "payload": { }
+  "timestamp": "2026-05-24T21:22:00.000Z",
+  "type": "text"
 }
 ```
-
-Extra fields (`kind`, `action`, `task_name`, `payload`) are embedded in the chat message format for compatibility.
-
-Reply routing is handled exclusively via MQTT v5 userProperties `reply_to`, not in the message body.
 
 ---
 

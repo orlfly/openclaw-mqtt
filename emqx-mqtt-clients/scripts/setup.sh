@@ -4,6 +4,7 @@
 # ==============================================================
 # 引导用户配置 EMQX 连接信息及 agent 身份标识。
 # 配置写入 ~/.openclaw/workspace/.env
+# 使用 Node.js + MQTT.js 脚本验证连接
 # ==============================================================
 
 set -e
@@ -14,6 +15,7 @@ ENV_FILE="$(cd "$SKILL_DIR/../../.." && pwd)/.env"
 
 echo "============================================"
 echo "  EMQX MQTT 客户端 Agent 安装设置"
+echo "  (Node.js + MQTT.js)"
 echo "============================================"
 echo ""
 echo "需要配置以下信息："
@@ -75,7 +77,7 @@ current="${EMQX_SENDER_NAME:-}"
 read -r -p "显示名称 (如 马龙 🛠️) [${current}]: " input
 EMQX_SENDER_NAME="${input:-${current}}"
 
-current="${EMQX_SENDER_EMOJI:-🛠️}"
+current="${EMQX_SENDER_EMOJI:-🤖}"
 read -r -p "头像 Emoji [${current}]: " input
 EMQX_SENDER_EMOJI="${input:-${current}}"
 
@@ -139,7 +141,7 @@ export EMQX_API_KEY EMQX_API_SECRET
 export EMQX_SENDER_ID EMQX_SENDER_NAME EMQX_SENDER_EMOJI EMQX_SENDER_DESC
 export EMQX_SUBSCRIBE_TOPIC
 
-if python3 "$SCRIPT_DIR/emqx_list_clients.py" --summary 2>/dev/null; then
+if node "$SCRIPT_DIR/emqx_list_clients.mjs" --summary 2>/dev/null; then
     echo "✅ EMQX 连接成功！"
 else
     echo "⚠️  连接失败，请检查 EMQX 地址和认证信息。"
@@ -156,5 +158,5 @@ echo "Agent 标识:    ${EMQX_SENDER_NAME} (${EMQX_SENDER_ID})"
 echo "接收 Topic:    ${EMQX_SUBSCRIBE_TOPIC}"
 echo ""
 echo "查看在线 agent:"
-echo "  source $ENV_FILE && python3 skills/emqx-mqtt-clients/scripts/emqx_list_clients.py"
+echo "  source $ENV_FILE && node $SCRIPT_DIR/emqx_list_clients.mjs"
 echo ""
