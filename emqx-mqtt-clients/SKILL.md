@@ -134,7 +134,7 @@ Two timeouts control the collection:
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `--timeout` | 300s | 等待**第一条**回复的最大超时 |
-| `--idle-timeout` | 5s | 收到回复后的**静默窗口**，超时后关闭 |
+| `--idle-timeout` | 15s | 收到回复后的**静默窗口**，超时后关闭 |
 
 ```bash
 node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \

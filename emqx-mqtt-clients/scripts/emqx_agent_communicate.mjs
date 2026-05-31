@@ -352,7 +352,7 @@ async function cmdSendWait(args) {
   const firstTimeout = args.timeout;      // 首条回复超时
   const idleTimeout  = args.idleTimeout;   // 后续消息间隔超时
 
-  const client = await createMqttClient(mqttHost, mqttPort, firstTimeout);
+  const client = await createMqttClient(mqttHost, mqttPort, 15);  // MQTT connect timeout fixed at 15s
 
   return new Promise((resolve, reject) => {
     const received = [];
@@ -514,7 +514,7 @@ async function main() {
       agent:           { type: "string" },
       msg:             { type: "string" },
       timeout:         { type: "string", default: "300" },
-      "idle-timeout":  { type: "string", default: "5" },
+      "idle-timeout":  { type: "string", default: "15" },
       qos:             { type: "string", default: "1" },
       filter:          { type: "string" },
       help:            { type: "boolean", default: false },
@@ -558,7 +558,7 @@ Options (send / send-wait):
 
 Options (send-wait):
   --timeout         Max seconds for first reply (default: 300)
-  --idle-timeout    Seconds of silence before closing (default: 5)
+  --idle-timeout    Seconds of silence before closing (default: 15)
 
 Options (discover):
   --filter          Filter by clientid pattern
