@@ -21,7 +21,7 @@
  *   node emqx_agent_communicate.mjs discover --filter "openclaw-"
  *   node emqx_agent_communicate.mjs subs openclaw-doc
  *   node emqx_agent_communicate.mjs send --agent openclaw-doc --msg "Hello"
- *   node emqx_agent_communicate.mjs send-wait --agent openclaw-doc --msg "汇报状态" --timeout 30
+ *   node emqx_agent_communicate.mjs send-wait --agent openclaw-doc --msg "汇报状态" --timeout 60 --idle-timeout 10
  *   node emqx_agent_communicate.mjs listen
  *
  * Environment:
@@ -324,10 +324,15 @@ async function cmdSend(args) {
  * send-wait — Send message via MQTT v5, wait for reply (blocking).
  *
  * Creates a unique reply topic, subscribes to it, publishes the message with
- * reply_to set to the unique topic, then blocks until a reply arrives or
- * timeout expires.
+ * reply_to set to the unique topic, then blocks collecting multiple replies
+ * until idle timeout expires.
  *
- * Reply is printed to stdout. On timeout, exits with code 1.
+ * Two timeouts:
+ *   --timeout        Max seconds to wait for FIRST reply (default: 300)
+ *   --idle-timeout   Seconds of silence after last reply before closing (default: 5)
+ *
+ * All replies are merged and printed to stdout as a JSON array.
+ * On timeout with no reply, exits with code 1.
  */
 async function cmdSendWait(args) {
   const mqttHost = args.emqxMqttHost || args.host;
@@ -344,20 +349,50 @@ async function cmdSendWait(args) {
   const payload = buildMessage(args.msg, senderId);
   const userProperties = buildUserProperties(senderId, senderName, senderEmoji, senderDesc, replyTopic);
 
-  const client = await createMqttClient(mqttHost, mqttPort, args.timeout);
+  const firstTimeout = args.timeout;      // 首条回复超时
+  const idleTimeout  = args.idleTimeout;   // 后续消息间隔超时
+
+  const client = await createMqttClient(mqttHost, mqttPort, firstTimeout);
 
   return new Promise((resolve, reject) => {
     const received = [];
+    let firstTimer = null;
+    let idleTimer = null;
     let settled = false;
+    let firstReplyArrived = false;
 
-    const timer = setTimeout(() => {
+    function clearTimers() {
+      if (firstTimer) { clearTimeout(firstTimer); firstTimer = null; }
+      if (idleTimer)  { clearTimeout(idleTimer);  idleTimer  = null; }
+    }
+
+    function finish(output) {
       if (settled) return;
       settled = true;
+      clearTimers();
       client.end();
-      console.error(`! No reply received within ${args.timeout}s timeout.`);
+      resolve(output);
+    }
+
+    // Timer: first reply must arrive within firstTimeout
+    firstTimer = setTimeout(() => {
+      if (firstReplyArrived) return; // already got at least one
+      console.error(`! No reply received within ${firstTimeout}s timeout.`);
       process.exitCode = 1;
-      resolve();
-    }, args.timeout * 1000);
+      finish(null);
+    }, firstTimeout * 1000);
+
+    // Idle timer helper: restarted after each message
+    function resetIdleTimer() {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        console.error(`Idle timeout (${idleTimeout}s), closing...`);
+        // Merge all replies into stdout
+        const merged = received.map(r => r.payload);
+        console.log(JSON.stringify(merged));
+        finish(merged);
+      }, idleTimeout * 1000);
+    }
 
     client.on("message", (topic, message, packet) => {
       const entry = {
@@ -372,43 +407,30 @@ async function cmdSendWait(args) {
       }
       received.push(entry);
 
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        client.end();
+      const meta = entry.userProperties || {};
+      console.error(`← Reply #${received.length} from ${meta.name || "?"} (${meta.description || ""}) ${meta.emoji || ""}`);
+      console.error(`  ${entry.payload.slice(0, 120)}${entry.payload.length > 120 ? "..." : ""}`);
 
-        // Stdout: raw reply payload (for programmatic capture)
-        console.log(entry.payload);
-        // Stderr: metadata
-        console.error("--- Reply received ---");
-        if (entry.userProperties) {
-          const up = entry.userProperties;
-          console.error(`  From: ${up.name || "?"} (${up.description || ""}) ${up.emoji || ""}`);
-        }
-        console.error(`  Topic: ${entry.topic}`);
-
-        resolve();
-      }
+      firstReplyArrived = true;
+      resetIdleTimer();
     });
 
     // 1. Subscribe to reply topic first (avoid missing reply)
     client.subscribe(replyTopic, { qos: args.qos }, (subErr) => {
       if (subErr) {
-        settled = true;
-        clearTimeout(timer);
+        clearTimers();
         client.end();
         reject(subErr);
         return;
       }
 
-      // 2. Then publish the task (reply listener already active)
+      // 2. Then publish the message (reply listener already active)
       client.publish(targetTopic, payload, {
         qos: args.qos,
         properties: { userProperties },
       }, (pubErr) => {
         if (pubErr) {
-          settled = true;
-          clearTimeout(timer);
+          clearTimers();
           client.end();
           reject(pubErr);
           return;
@@ -416,9 +438,9 @@ async function cmdSendWait(args) {
 
         // 3. Now the message is actually sent
         console.error(`→ Sent to ${args.agent} on '${targetTopic}'`);
-        console.error(`  Reply topic: ${replyTopic}`);
+        console.error(`  Reply topic: ${replyTopic}  (collecting replies)`);
         console.error(`  Sender: ${senderName} (${senderId}) ${senderEmoji}`);
-        console.error(`  Waiting for reply (timeout=${args.timeout}s)...`);
+        console.error(`  First-reply timeout=${firstTimeout}s  idle-timeout=${idleTimeout}s`);
         console.error("");
       });
     });
@@ -492,6 +514,7 @@ async function main() {
       agent:           { type: "string" },
       msg:             { type: "string" },
       timeout:         { type: "string", default: "300" },
+      "idle-timeout":  { type: "string", default: "5" },
       qos:             { type: "string", default: "1" },
       filter:          { type: "string" },
       help:            { type: "boolean", default: false },
@@ -510,7 +533,7 @@ Commands:
   subs <clientid>             Show agent subscriptions
   send --agent <id> --msg <text>
                               Fire-and-forget publish via MQTT v5
-  send-wait --agent <id> --msg <text> [--timeout <s>]
+  send-wait --agent <id> --msg <text> [--timeout <s>] [--idle-timeout <s>]
                               Send message + wait for reply (blocking)
   listen                      Listen on {senderId}/inbound
 
@@ -534,7 +557,8 @@ Options (send / send-wait):
   --msg             Message text (required)
 
 Options (send-wait):
-  --timeout         Max seconds to wait (default: 300)
+  --timeout         Max seconds for first reply (default: 300)
+  --idle-timeout    Seconds of silence before closing (default: 5)
 
 Options (discover):
   --filter          Filter by clientid pattern
@@ -543,7 +567,7 @@ Examples:
   node emqx_agent_communicate.mjs discover --filter "openclaw-"
   node emqx_agent_communicate.mjs subs openclaw-doc
   node emqx_agent_communicate.mjs send --agent openclaw-doc --msg "Hello"
-  node emqx_agent_communicate.mjs send-wait --agent openclaw-doc --msg "汇报状态" --timeout 30
+  node emqx_agent_communicate.mjs send-wait --agent openclaw-doc --msg "汇报状态" --timeout 60 --idle-timeout 10
   node emqx_agent_communicate.mjs listen`);
     return;
   }
@@ -555,6 +579,7 @@ Examples:
   args.apiSecret  = args["api-secret"] || getEnvOrRaise("EMQX_API_SECRET");
   args.emqxMqttPort = parseInt(args["emqx-mqtt-port"] || getEnv("EMQX_MQTT_PORT") || "1883", 10);
   args.timeout     = parseInt(args.timeout, 10);
+  args.idleTimeout = parseInt(args["idle-timeout"], 10);
   args.qos         = parseInt(args.qos, 10);
 
   switch (command) {

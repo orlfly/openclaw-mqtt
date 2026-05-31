@@ -128,17 +128,20 @@ node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs subs openclaw-d
 ### Send & Wait (reply routing built-in)
 
 **`send-wait`** — the key command for cross-channel scenarios.
-Uses MQTT v5 userProperties to carry sender identity and reply routing.
-Sends a task with `reply_to` in userProperties, subscribes to that topic and blocks until the agent replies.
+Sends a message and collects **all replies** within the idle window.
+Two timeouts control the collection:
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--timeout` | 300s | 等待**第一条**回复的最大超时 |
+| `--idle-timeout` | 5s | 收到回复后的**静默窗口**，超时后关闭 |
 
 ```bash
 node skills/emqx-mqtt-clients/scripts/emqx_agent_communicate.mjs send-wait \
-  --agent openclaw-doc --msg "请汇报状态" --timeout 30
+  --agent openclaw-doc --msg "汇报状态" --timeout 60 --idle-timeout 10
 ```
 
-The agent receives the task with:
-- **userProperties**: `name`, `description`, `emoji`, `reply_to=agent-reply/<id>`
-- Agent should publish its response to the `reply_to` topic in userProperties
+输出为 JSON 数组，包含所有回复的 payload。stderr 输出每条到达的回复元数据。
 
 ### Fire & Forget
 
