@@ -76,13 +76,40 @@ role-train (分析 + 规划下一轮)
 | T4C | T4C_WRITE | "写 AGENTS.md，2-4KB" | "写完 + 字节数" |
 | T4C | T4C_PING | "ping" | 同上 |
 
-### 阶段 5: 三层验证 (A+B+C)
+### 阶段 5: 三层验证 (A+B+C) + 循环 + 阶段 6 收尾
 
 | 轮 | 状态 | 发什么 | 期望 Agent 回复 |
 |---|---|---|---|
 | T5A | T5A_SELF_REPORT | "3 句话自报身份+工作流+边界" | 3 句压缩复述 |
 | T5B | T5B_HARD_CHECK | 5-10 条**从原文件抽出的硬指标**，让 Agent 逐条回 1/0 | `1,0,1,1,0,...` 格式 |
 | T5C | T5C_DIFF | "读 3 个文件，告诉我哪些原文件里有的你没记下" | 漏点列表 / "无" |
+| T5D | T5D_REINFORCE | 列 T5B 漏点 + 让 Agent 补 SOUL/AGENTS | 报告补了什么 + 新字节数 |
+| T5 循环 | 🔁 | T5D 完后调退出判定；不退出则回到 T5A | 漏点逐渐减少或资源耗尽 |
+| T6 | T6_BOOTSTRAP_CLEAR | "处理 BOOTSTRAP.md + 在 MEMORY.md 标记基础设定完成" | "已标记"/"已完成" |
+
+### T5 循环退出判定 (2026-06-11 增)
+
+退出条件 (任一):
+1. **乐观**: T5B 漏点 = 0 → 走 T6
+2. **悲观**: 漏点不减少 (上一轮 ≥ 本轮) → 走 T6
+3. **资源**: `t5LoopCount >= maxT5Loops` (默认 3) → 走 T6
+
+走 T6 收尾后调 `planT6Turn()` 让 Agent:
+- 确认 3 文件存在 (`ls -la`)
+- 处理 BOOTSTRAP.md (移走/删除)
+- 在 MEMORY.md 顶部加 `# 基础设定完成于 YYYY-MM-DD`
+
+### 阶段 6→7: 技能推荐 + 现状对照 (2026-06-11 增)
+
+训练完成后，推荐该角色需要的 skill。**T6 完后如有 recommendedSkills → T7**；否则跳过 T7。
+
+| 轮 | 状态 | 发什么 | 期望 Agent 回复 |
+|---|---|---|---|
+| T7A | T7A_RECOMMEND | 列出 skill-matcher 匹配的 10-12 个推荐 + 让 Agent `ls ~/.openclaw/skills/` | 已装清单（逗号分隔）|
+| T7B | T7B_INSTALLED | (不发 prompt) 直接读 T7A 回复解析已装清单 | - |
+| T7C | T7C_DECISION | 比对推荐 vs 已装 → 列待装 + **明确给 `skill_workshop install <id>` 命令** | Agent 报"已登记: <id>，全部已装 + 登记完" |
+
+**教头不代 Agent 决策装不装**。
 
 ### 死锁防护 4 重门
 
@@ -98,7 +125,9 @@ T1_ASK → T1_ACK → T2_ASK → T2_ACK
   → T3A_ASK → T3A_ACK → T3B_ASK → T3B_ACK → T3C_ASK → T3C_ACK
   → T4A_WRITE → T4A_PING → T4B_WRITE → T4B_PING → T4C_WRITE → T4C_PING
   → T5A_SELF_REPORT → T5B_HARD_CHECK → T5C_DIFF
-  → COMPLETE
+  → T5D_REINFORCE → (循环退出判定) → T5A_SELF_REPORT / T6_BOOTSTRAP_CLEAR
+  → T6_BOOTSTRAP_CLEAR → T7A_RECOMMEND (有推荐) / COMPLETE (无推荐)
+  → T7A_RECOMMEND → T7B_INSTALLED → T7C_DECISION → COMPLETE
 ```
 
 如果某轮 Agent 复述含糊，会在该状态内重试 1~2 次；超过 max-turns 仍未达标则 ABORT。T5B 解析失败连续 3 次后放弃 → 仍走 T5C。
@@ -310,7 +339,7 @@ role-train/
 ├── skill-shortlist.json           # 60 个推荐 skill 清单（由教头/2026-06-10 提炼）
 └── scripts/
     ├── train-role.mjs             # CLI 入口：解析参数、调度 planner、推存 skill
-    ├── conversation-planner.mjs   # 状态机：规划 T1~T5 18 状态纯文本内容（含 v2 对话引导 + T5B 硬指标抽取）
+    ├── conversation-planner.mjs   # 状态机：规划 T1~T6 20 状态纯文本内容（含 v2 对话引导 + T5B 硬指标抽取 + T5 循环 + T6 收尾）
     ├── feedback-analyzer.mjs      # 回复分类：识别“已收到/我是XX/错误/问号”
     ├── mqtt-adapter.mjs           # 通讯适配层：封装 emqx-mqtt-clients 的 send-wait
     ├── skill-matcher.mjs          # 🆕 角色→ skill 匹配器（60 skill × 24 family）

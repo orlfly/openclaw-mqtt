@@ -53,6 +53,11 @@ const STATES = {
   T5B_HARD_CHECK:  "T5B_HARD_CHECK",   // 教头发硬指标清单，Agent 逐条标记
   T5C_DIFF:        "T5C_DIFF",         // 教头 diff 文件 + Agent 复述漏点
   T5D_REINFORCE:   "T5D_REINFORCE",    // 补强轮：T5B 漏点 >= 1 时让 Agent 补充
+  T6_BOOTSTRAP_CLEAR: "T6_BOOTSTRAP_CLEAR",  // 2026-06-11 增: 让 Agent 处理 BOOTSTRAP.md
+  // ── 阶段 7: 技能推荐 + 现状对照 (2026-06-11 增) ──
+  T7A_RECOMMEND:    "T7A_RECOMMEND",     // 教头发推荐 skill 清单
+  T7B_INSTALLED:    "T7B_INSTALLED",     // Agent 报已装清单
+  T7C_DECISION:     "T7C_DECISION",      // 教头比对 + Agent 决策要不要装
 
   COMPLETE:      "COMPLETE",
   ABORT:         "ABORT",
@@ -78,12 +83,17 @@ const TRANSITIONS = {
   T4C_WRITE:         ["T4C_PING", "ABORT"],
   T4C_PING:          ["T5A_SELF_REPORT", "T4C_WRITE", "ABORT"],
   T5A_SELF_REPORT:   ["T5B_HARD_CHECK", "T5A_SELF_REPORT", "ABORT"],
-  T5B_HARD_CHECK:    ["T5C_DIFF", "COMPLETE", "T5B_HARD_CHECK", "ABORT"],
-  // T5B 完后：有漏点 → T5C_DIFF；0 漏点 → COMPLETE；重投 T5B
-  T5C_DIFF:          ["T5D_REINFORCE", "COMPLETE", "T5C_DIFF", "ABORT"],
-  // T5C 完后：有漏点 → T5D_REINFORCE；0 漏点 → COMPLETE；重投 T5C
-  T5D_REINFORCE:     ["T5A_SELF_REPORT", "COMPLETE", "T5D_REINFORCE", "ABORT"],
-  // T5D 完后：循环退出判定 → T5A 或 COMPLETE；重投 → T5D_REINFORCE
+  T5B_HARD_CHECK:    ["T5C_DIFF", "T6_BOOTSTRAP_CLEAR", "T5B_HARD_CHECK", "ABORT"],
+  // T5B 完后：有漏点 → T5C_DIFF；0 漏点 → T6_BOOTSTRAP_CLEAR (2026-06-11)；重投 T5B
+  T5C_DIFF:          ["T5D_REINFORCE", "T6_BOOTSTRAP_CLEAR", "T5C_DIFF", "ABORT"],
+  // T5C 完后：有漏点 → T5D_REINFORCE；0 漏点 → T6 收尾；重投 T5C
+  T5D_REINFORCE:     ["T5A_SELF_REPORT", "T6_BOOTSTRAP_CLEAR", "T5D_REINFORCE", "ABORT"],
+  // T5D 完后：循环退出判定 → T5A 或 T6；重投 → T5D_REINFORCE
+  T6_BOOTSTRAP_CLEAR: ["COMPLETE", "T7A_RECOMMEND", "T6_BOOTSTRAP_CLEAR", "ABORT"],
+  // 2026-06-11 增：T6 完后可走 T7 推荐技能（默认走）；直接走 COMPLETE 是省略
+  T7A_RECOMMEND:     ["T7B_INSTALLED", "T7A_RECOMMEND", "ABORT"],
+  T7B_INSTALLED:     ["T7C_DECISION", "T7B_INSTALLED", "ABORT"],
+  T7C_DECISION:      ["COMPLETE", "T7C_DECISION", "ABORT"],
   COMPLETE:          [],
   ABORT:             [],
 };
@@ -134,6 +144,7 @@ export class ConversationPlanner {
     this.t5LoopCount = 0;          // T5 循环次数
     this.t5LoopHistory = [];       // 每轮漏点数记录 [{iteration, missed, bResults}]
     this.maxT5Loops = 3;           // T5 最大循环次数 (资源保护)
+    this.t7bInstalled = "";        // T7B 解析出的 Agent 已装 skill 列表 (2026-06-11 增)
   }
 
   async run(sendFn) {
@@ -193,6 +204,12 @@ export class ConversationPlanner {
       case STATES.T5B_HARD_CHECK:  return this.handleT5B(sendFn);
       case STATES.T5C_DIFF:        return this.handleAsk(sendFn, "T5C", this.planT5CTurn.bind(this));
       case STATES.T5D_REINFORCE:   return this.handleAsk(sendFn, "T5D", this.planT5DTurn.bind(this));
+      // ── 阶段 6: 基础设定收尾 (2026-06-11 增) ──
+      case STATES.T6_BOOTSTRAP_CLEAR: return this.handleAsk(sendFn, "T6", this.planT6Turn.bind(this));
+      // ── 阶段 7: 技能推荐 + 现状对照 (2026-06-11 增) ──
+      case STATES.T7A_RECOMMEND:    return this.handleAsk(sendFn, "T7A", this.planT7ATurn.bind(this));
+      case STATES.T7B_INSTALLED:    return this.handleT7B(sendFn);
+      case STATES.T7C_DECISION:     return this.handleAsk(sendFn, "T7C", this.planT7CTurn.bind(this));
 
       default: throw new Error(`invalid state: ${this.state}`);
     }
@@ -331,6 +348,65 @@ export class ConversationPlanner {
     ].join("\n");
   }
 
+  /** T6: 基础设定收尾 (2026-06-11 增) */
+  planT6Turn() {
+    const today = new Date().toISOString().slice(0, 10);
+    return [
+      `最后一步——基础设定收尾：`,
+      ``,
+      `1. 用 \`ls -la\` 确认 IDENTITY.md / SOUL.md / AGENTS.md 都已存在`,
+      `2. \`BOOTSTRAP.md\` 是新装 Agent 的初始化引导文件，现在不需要了。请处理：`,
+      `   - 如还在 → \`mv BOOTSTRAP.md BOOTSTRAP.md.done\` (或删除)`,
+      `   - 如已不在 → 跳过这一步`,
+      `3. 在 \`MEMORY.md\` 顶部加一行：\`# 基础设定完成于 ${today}（role: ${this.roleName}）\``,
+      `   - 如 MEMORY.md 不存在 → 用 write 创建`,
+      ``,
+      `完成后回"基础设定完成"或"已标记"。`,
+    ].join("\n");
+  }
+
+  /** T7A: 教头发推荐 skill 清单 + 问 Agent 已装什么 */
+  planT7ATurn() {
+    const skills = this.role.recommendedSkills || [];
+    if (skills.length === 0) {
+      return `没推荐 skill，跳过 T7。`;
+    }
+    const list = skills.map((s, i) => `${i + 1}. **${s.name || s.id}** (${s.family || "?"}, ${s.installs || "?"} installs)`).join("\n");
+    return [
+      `现在进行技能推荐。基于你角色${this.roleName}，匹配到 ${skills.length} 个适合你的 skill：`,
+      ``,
+      list,
+      ``,
+      `请用 \`ls ~/.openclaw/skills/\` 看你工作区已装哪些 skill，回我：`,
+      `- 已装清单（逗号分隔）`,
+      `- 路径不对或其他情况也请说明`,
+    ].join("\n");
+  }
+
+  /** T7C: 教头比对 推荐 vs 已装 → 列待装 → 要求 Agent 装机 (2026-06-11 改) */
+  planT7CTurn() {
+    const skills = this.role.recommendedSkills || [];
+    const installed = (this.t7bInstalled || "").split(/[,，\s]+/).filter(Boolean);
+    const missing = skills.filter(s => !installed.includes(s.name) && !installed.includes(s.id));
+    if (missing.length === 0) {
+      return `你已装全部推荐 skill，跳过装机。`;
+    }
+    const list = missing.map((s, i) => {
+      const cmd = `skill_workshop install ${s.id}`;
+      return `${i + 1}. \`${cmd}\`  (${s.name || s.id}, ${s.family || "?"}, ${s.installs || "?"} installs, path: ${s.path || "?"})`;
+    }).join("\n");
+    return [
+      `推荐 vs 已装对比：你差 ${missing.length} 个 skill，需走 skill_workshop 登记：`,
+      ``,
+      list,
+      ``,
+      `请依次运行上面 ${missing.length} 条 \`skill_workshop install\` 命令。`,
+      `每装一个等系统回 \`已登记: <id>\`，全部装完后报\`全部已装 + 登记完\`。`,
+      ``,
+      `如某条 install 报错（如网络/权限），请报出错误，不要跳过。`,
+    ].join("\n");
+  }
+
   /** T5B 专用：硬指标对照清单 */
   planT5BTurn() {
     const list = this.hardChecks.map((c, i) => `${i + 1}. ${c}`).join("\n");
@@ -456,19 +532,29 @@ export class ConversationPlanner {
       return;
     }
     this.recordTurn("trainer", text, result.reply, null);
-    // T4 子步不需要 ACK，直接进 PING；T5 阶段统一走“循环 / 退出”判定；其他走 _ACK
+    // T4 子步不需要 ACK，直接进 PING；T5 阶段统一走“循环 / 退出”判定；T5 后接 T6 收尾；其他走 _ACK
     let next;
     if (label.startsWith("T4")) next = `${label}_PING`;
     else if (label === "T5A") next = STATES.T5B_HARD_CHECK;
     else if (label === "T5C") {
-      // 判定循环：漏点≥1 → T5D_REINFORCE；漏点=0 → 退出
+      // 判定循环：漏点≥1 → T5D_REINFORCE；漏点=0 → 走 T6 收尾
       const missed = this.t5bResults?.results?.filter(r => !r.remembered) || [];
-      next = missed.length > 0 ? STATES.T5D_REINFORCE : STATES.COMPLETE;
+      next = missed.length > 0 ? STATES.T5D_REINFORCE : STATES.T6_BOOTSTRAP_CLEAR;
     } else if (label === "T5D") {
-      // T5D 完后：调 T5 循环退出判定
-      next = this._shouldExitT5Loop() ? STATES.COMPLETE : STATES.T5A_SELF_REPORT;
-      this.t5LoopCount++;
-    } else next = `${label}_ACK`;
+      // T5D 完后：调 T5 循环退出判定；退出后走 T6 收尾
+      if (this._shouldExitT5Loop()) {
+        next = STATES.T6_BOOTSTRAP_CLEAR;
+      } else {
+        next = STATES.T5A_SELF_REPORT;
+        this.t5LoopCount++;
+      }
+    } else if (label === "T6") {
+      // 2026-06-11 增: T6 完后默认走 T7 推荐技能 (有推荐的话)；无推荐才走 COMPLETE
+      const hasSkills = (this.role.recommendedSkills || []).length > 0;
+      next = hasSkills ? STATES.T7A_RECOMMEND : STATES.COMPLETE;
+    } else if (label === "T7C") next = STATES.COMPLETE;  // T7C 完后走 COMPLETE
+    else if (label === "T7A") next = STATES.T7B_INSTALLED;  // T7A 完后走 T7B 解析
+    else next = `${label}_ACK`;
     this.transition(next, { reason: `${label} sent; awaiting ${next}` });
   }
 
@@ -570,10 +656,10 @@ export class ConversationPlanner {
         bResults: parsed.results,
       });
 
-      // 0 漏点 → 直接 COMPLETE (不进 T5C/T5A 循环)
+      // 0 漏点 → 走 T6 收尾 (不进 T5C/T5A 循环)
       if (missed.length === 0) {
-        this.log(`   ✅ T5B 0 漏点 → 跳过 T5C/T5D，直接 COMPLETE`);
-        this.transition(STATES.COMPLETE, { reason: `T5B 0 漏点 (第 ${this.t5LoopCount + 1} 轮): 训练完成` });
+        this.log(`   ✅ T5B 0 漏点 → 走 T6 收尾`);
+        this.transition(STATES.T6_BOOTSTRAP_CLEAR, { reason: `T5B 0 漏点 (第 ${this.t5LoopCount + 1} 轮): 走 T6 收尾` });
         return;
       }
 
@@ -589,6 +675,18 @@ export class ConversationPlanner {
         this.transition(STATES.T5C_DIFF, { reason: `T5B gave up after ${this.t5bAttempts} attempts; moving to T5C` });
       }
     }
+  }
+
+  /** T7B: 解析 Agent 已装 skill 清单 */
+  async handleT7B(sendFn) {
+    this.turn++;
+    this.log(`\n── 第 ${this.turn} 轮 [T7B_INSTALLED] 解析已装清单 ──`);
+    // T7B 是一次交互：教头不发 prompt，直接读上一轮 (T7A) 的 Agent 回复
+    // 因为 T7A 末尾要求 Agent 回已装清单
+    const lastReply = this.history[this.history.length - 1]?.reply || "";
+    this.t7bInstalled = lastReply;
+    this.log(`   已装 (raw): ${lastReply.slice(0, 80)}`);
+    this.transition(STATES.T7C_DECISION, { reason: "T7B 解析已装清单" });
   }
 
   // ── T5 循环退出判定 (2026-06-11 增) ──

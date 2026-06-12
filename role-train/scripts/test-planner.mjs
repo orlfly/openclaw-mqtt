@@ -521,9 +521,9 @@ await test("v2 _parseT5BResults: 无法解析 → valid=false", async () => {
 
 // ── 状态机转移 ──
 
-await test("v2 TRANSITIONS: 状态数 (5 阶段 + T5D + COMPLETE + ABORT)", async () => {
-  // 5 阶段共计 20 个业务状态 (含 T5D) + COMPLETE + ABORT = 22
-  const expectedCount = 22;
+await test("v2 TRANSITIONS: 状态数 (5 阶段 + T5D + T6 + T7A/B/C + COMPLETE + ABORT)", async () => {
+  // 5 阶段 + T5D + T6 + T7A/B/C + COMPLETE + ABORT = 26
+  const expectedCount = 26;
   return assertEq(Object.keys(STATES).length, expectedCount,
     `应有 ${expectedCount} 个状态，实际 ${Object.keys(STATES).length}`);
 });
@@ -647,7 +647,8 @@ await test("v2 happy path 22 轮: T5B 漏点 → T5D 补强 → COMPLETE", async
     "我漏了：全部 8 条",        // T5C
     "已补 SOUL.md 1920B",      // T5D 新增
     "我是麦芒第二轮：8条全记住了",  // T5A 循环
-    "1,1,1,1,1,1,1,1",         // T5B 循环：全记住 → 0 漏点 → COMPLETE
+    "1,1,1,1,1,1,1,1",         // T5B 循环：全记住 → 0 漏点 → 走 T6
+    "基础设定完成",        // T6 新增
   ]);
   const planner = new ConversationPlanner({
     role: makeV2Role(),
@@ -676,7 +677,7 @@ await test("v2 T5B 0 漏点时跳过 T5D 直走 COMPLETE", async () => {
     "我是麦芒，AI助手+招聘专家；七步工作流；四条边界",
     "1,1,1,1,1,1,1,1",  // T5B 8 个 1 → 全记住
     "无",                 // T5C 无漏点
-    // 注意：没有 T5D reply——应该跳过 T5D 直走 COMPLETE
+    "基础设定完成",       // T6 新增
   ]);
   const planner = new ConversationPlanner({ role: makeV2Role(), maxTurns: 22 });
   const result = await planner.run(mock.sendFn);
@@ -802,8 +803,8 @@ await test("v2 循环: 端到端 - 2 轮循环后 0 漏点 COMPLETE", async () =
     "我漏了：4条",             // T5C 第 2 轮
     "已补 1920B → 2080B",     // T5D 第 2 轮
     "我是麦芒第三轮：补了 0 条",  // T5A 第 3 轮 (循环)
-    "1,1,1,1,1,1,1,1",         // T5B 第 3 轮：0 漏 → COMPLETE
-    // 不需要 T5C/T5D (0 漏点直接走 COMPLETE)
+    "1,1,1,1,1,1,1,1",         // T5B 第 3 轮：0 漏 → 走 T6
+    "基础设定完成",            // T6 新增
   ]);
   const planner = new ConversationPlanner({ role: makeV2Role(), maxTurns: 34 });
   const result = await planner.run(mock.sendFn);
@@ -834,12 +835,131 @@ await test("v2 循环: 悲观停止 - 漏点不减少 2 轮后退出", async () 
     "我是麦芒第 2 轮",
     "0,0,0,0,0,0,0,0",         // T5B 第 2 轮：8 漏 (不减少 → 悲观停止)
     "我漏了：8条",             // T5C 第 2 轮
-    "还是没补上",              // T5D 第 2 轮 (悲观停止后走 COMPLETE)
+    "还是没补上",              // T5D 第 2 轮 (悲观停止后走 T6)
+    "基础设定完成",            // T6 新增
   ]);
   const planner = new ConversationPlanner({ role: makeV2Role(), maxTurns: 34 });
   const result = await planner.run(mock.sendFn);
   if (!result.success) {
     console.log(`     [DEBUG pessimistic] state=${result.state} reason=${result.finalReason}`);
+  }
+  return assertEq(result.success, true, `应成功，实际: ${result.state}, ${result.finalReason}`);
+});
+
+// ── T6 基础设定收尾 (2026-06-11 增) ──
+
+await test("v2 planT6Turn: 引导处理 BOOTSTRAP.md + MEMORY.md 标记", async () => {
+  const p = new ConversationPlanner({ role: makeV2Role(), maxTurns: 34 });
+  const text = p.planT6Turn();
+  return assertContains(text, "BOOTSTRAP", "应提 BOOTSTRAP.md")
+    || assertContains(text, "MEMORY", "应提 MEMORY.md")
+    || assertContains(text, "基础设定", "应提'基础设定'")
+    || assertContains(text, "ls -la", "应让 Agent 用 ls -la 确认")
+    || /完成于 \d{4}-\d{2}-\d{2}/.test(text);
+});
+
+await test("v2 T6: Agent 报'已标记' → COMPLETE", async () => {
+  const mock = makeMockSend([
+    "我叫麦芒，AI 助手+招聘专家，服务教头。风格：干脆靠谱有主见",
+    "边界：1)不帮歧视 2)不泄隐私 3)不帮欺诈。沉默：碰红线拒。风格：师傅气",
+    "1.需求澄清 2.画像 3.渠道 4.筛选 5.面试 6.Offer 7.入职",
+    "ATS Moka LinkedIn 脉脉 飞书",
+    "举例第 4 步：某公司 200 简历筛 15 人",
+    "写完 IDENTITY.md 808B",
+    "pong",
+    "写完 SOUL.md 1511B",
+    "pong",
+    "写完 AGENTS.md 3374B",
+    "pong",
+    "我是麦芒",
+    "1,1,1,1,1,1,1,1",          // T5B 0 漏点
+    "BOOTSTRAP.md 已移走，MEMORY.md 标记完成",  // T6
+  ]);
+  const planner = new ConversationPlanner({ role: makeV2Role(), maxTurns: 22 });
+  const result = await planner.run(mock.sendFn);
+  if (!result.success) {
+    console.log(`     [DEBUG T6] state=${result.state} reason=${result.finalReason}`);
+  }
+  return assertEq(result.success, true, `应成功，实际: ${result.state}, ${result.finalReason}`);
+});
+
+// ── T7 技能推荐 + 现状对照 (2026-06-11 增) ──
+
+await test("v2 planT7ATurn: 包含推荐 skill 清单 + 让 Agent ls skills/", async () => {
+  // makeV2Role 默认没有 recommendedSkills, 手工加一个
+  const role = makeV2Role();
+  role.recommendedSkills = [
+    { id: "playwright", name: "Playwright Browser Automation", family: "browser", installs: 56, path: "onlyloveher/playwright-automation-v1/SKILL.md" },
+    { id: "claw-backup", name: "Claw Backup", family: "infra", installs: 999, path: "hhse/openclaw-backupgg/SKILL.md" },
+  ];
+  const p = new ConversationPlanner({ role, maxTurns: 34 });
+  const text = p.planT7ATurn();
+  return assertContains(text, "Playwright", "应提 Playwright skill")
+    || assertContains(text, "Claw Backup", "应提 Claw Backup")
+    || assertContains(text, "ls ~/.openclaw/skills/", "应让 Agent ls")
+    || assertContains(text, "browser", "应含 family 标记");
+});
+
+await test("v2 planT7CTurn: 比对 已装 vs 推荐 → 列待装 + 让 Agent 决策", async () => {
+  const role = makeV2Role();
+  role.recommendedSkills = [
+    { id: "playwright", name: "Playwright Browser Automation", family: "browser", path: "x/y" },
+    { id: "claw-backup", name: "Claw Backup", family: "infra", path: "a/b" },
+  ];
+  const p = new ConversationPlanner({ role, maxTurns: 34 });
+  p.t7bInstalled = "playwright, claw-backup";  // 模拟两个都已装
+  const text = p.planT7CTurn();
+  return assertContains(text, "已装全部推荐 skill", "全装时跳装机");
+});
+
+await test("v2 planT7CTurn: 部分已装时列待装", async () => {
+  const role = makeV2Role();
+  role.recommendedSkills = [
+    { id: "playwright", name: "Playwright Browser Automation", family: "browser", path: "x/y" },
+    { id: "claw-backup", name: "Claw Backup", family: "infra", path: "a/b" },
+    { id: "moka", name: "Moka HR", family: "hr-ats", path: "m/n" },
+  ];
+  const p = new ConversationPlanner({ role, maxTurns: 34 });
+  p.t7bInstalled = "playwright";  // 只装了 1/3
+  const text = p.planT7CTurn();
+  return assertContains(text, "Moka HR", "应列待装的 Moka")
+    || assertContains(text, "Claw Backup", "应列待装的 Claw Backup")
+    || !text.includes("Playwright Browser")
+    || assertContains(text, "skill_workshop install moka", "应给 Moka 安装命令")
+    || assertContains(text, "skill_workshop install claw-backup", "应给 Claw Backup 安装命令")
+    || assertContains(text, "skill_workshop install playwright", "不应给 Playwright 安装命令")
+    || assertContains(text, "已登记", "应提期望的装后反馈");
+});
+
+await test("v2 T6→T7 端到端: 有推荐 skill 时走 T7A/B/C", async () => {
+  const role = makeV2Role();
+  role.recommendedSkills = [
+    { id: "playwright", name: "Playwright", family: "browser", path: "x/y" },
+    { id: "claw-backup", name: "Claw Backup", family: "infra", path: "a/b" },
+  ];
+  const mock = makeMockSend([
+    "我叫麦芒，AI 助手+招聘专家。风格：干脆靠谱有主见",
+    "边界：1)不帮歧视 2)不泄隐私。沉默：碰红线拒。风格：师傅气",
+    "1.需求澄清 2.画像 3.渠道 4.筛选 5.面试 6.Offer 7.入职",
+    "ATS Moka LinkedIn 脉脉 飞书",
+    "举例第 4 步：某公司 200 简历筛 15 人",
+    "写完 IDENTITY.md 808B",
+    "pong",
+    "写完 SOUL.md 1511B",
+    "pong",
+    "写完 AGENTS.md 3374B",
+    "pong",
+    "我是麦芒",
+    "1,1,1,1,1,1,1,1,1,1",    // T5B 10 个 1 0 漏点
+    "已标记基础设定",          // T6
+    "已装：playwright, claw-backup",  // T7A 末尾 Agent 回已装 (作为 T7B 解析输入)
+    // T7B 不发 prompt — 直接读 T7A 回复
+    "A",                       // T7C 选 A 全部装 (但推荐都已装, 会跳装机回 "已装全部")
+  ]);
+  const planner = new ConversationPlanner({ role, maxTurns: 22 });
+  const result = await planner.run(mock.sendFn);
+  if (!result.success) {
+    console.log(`     [DEBUG T7] state=${result.state} reason=${result.finalReason}`);
   }
   return assertEq(result.success, true, `应成功，实际: ${result.state}, ${result.finalReason}`);
 });
@@ -880,7 +1000,8 @@ await test("v2 happy path 18 轮 → COMPLETE", async () => {
     "已追加到 SOUL.md：增加了背调书面授权 和 offer不随意撤回 两条。当前 SOUL.md 1920B",
     // T5A 重走 (循环): 乐观场景下 Agent 第二轮 T5B 漏点应减少
     "我是麦芒第二轮：7步工作流和边界已完整背下来",
-    "1,1,1,1,1,1,1,1,1,1",  // 第二轮 T5B 全记住 → 0 漏点 → COMPLETE
+    "1,1,1,1,1,1,1,1,1,1",  // 第二轮 T5B 全记住 → 0 漏点 → 走 T6
+    "基础设定完成",        // T6 新增
   ]);
   const planner = new ConversationPlanner({
     role: makeV2Role(),
@@ -890,8 +1011,10 @@ await test("v2 happy path 18 轮 → COMPLETE", async () => {
   const result = await planner.run(mock.sendFn);
   if (!result.success) {
     console.log(`     [DEBUG] finalReason: ${result.finalReason}`);
-    console.log(`     [DEBUG] last 3 history:`);
-    for (const h of result.history.slice(-3)) {
+    console.log(`     [DEBUG] state: ${result.state}`);
+    console.log(`     [DEBUG] turns: ${result.turns}`);
+    console.log(`     [DEBUG] last 4 history:`);
+    for (const h of result.history.slice(-4)) {
       console.log(`       sent: ${(h.sentPreview || "").slice(0, 60)}`);
       console.log(`       reply: ${(h.reply || "").slice(0, 60)}`);
     }
@@ -919,6 +1042,7 @@ await test("v2 T5B 解析失败时 3 次后放弃 → 仍走 T5C", async () => {
     "还是不懂",                // T5B 解析失败 2
     "再试一下",                // T5B 解析失败 3
     "我漏了：背调必须获得候选人书面授权",  // T5C
+    "基础设定完成",        // T6 新增
   ]);
   const planner = new ConversationPlanner({
     role: makeV2Role(),

@@ -235,7 +235,16 @@ async function main() {
       ],
     };
     console.log(planner.planT5DTurn());
-    console.log("\n[注] T5B 无漏点时跳过 T5D，直接走 COMPLETE]");
+    console.log("\n[注] T5B 无漏点时跳过 T5D，直接走 T6]");
+    console.log("\n── T6: 基础设定收尾 (2026-06-11 增) ──");
+    console.log(planner.planT6Turn());
+    console.log("\n── T7A: 技能推荐 (2026-06-11 增) ──");
+    console.log(planner.planT7ATurn());
+    console.log("\n[注] T6 完后如有 recommendedSkills → T7A/B/C 走 T7 装机决策；否则跳过]");
+    console.log("\n── T7C: 比对 + 命令 Agent 用 skill_workshop install 安装 ──");
+    // 模拟 T7B Agent 报"已装：claw-backup" (一个装一个没装)
+    planner.t7bInstalled = "claw-backup";
+    console.log(planner.planT7CTurn());
     return;
   }
 
