@@ -25,6 +25,7 @@ import { fileURLToPath } from "url";
 import { ConversationPlanner } from "./conversation-planner.mjs";
 import { MqttClient, healthCheck, resolveEmqxScript } from "./mqtt-adapter.mjs";
 import { buildRecommendedSkillsSection } from "./skill-matcher.mjs";
+import { resolvePlatform } from "./platform-config.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SKILL_DIR = resolve(__dirname, "..");
@@ -172,6 +173,13 @@ async function main() {
   const allSections = getAllSections(content);
   const role = await buildRoleFiles(roleFilePath, fm, allSections);
 
+  // 2026-06-12 增: 解析 platform 配置 (3 层覆盖: CLI > role > env > 默认 openclaw)
+  const platform = resolvePlatform({
+    cliPlatform: args.platform,
+    roleMeta: role.roleMeta?.platform,
+  });
+  log("🧩 平台", `${platform.id} (skillDirs: ${platform.skillDirs.length}, install: ${platform.installCommand.split(" ")[0]})`);
+
   console.log(`\n${"=".repeat(60)}`);
   console.log(`  ${role.roleEmoji}  角色:   ${role.roleName}`);
   console.log(`  🆔  ID:     ${role.slug}`);
@@ -189,7 +197,7 @@ async function main() {
     console.log(`  Dump:  ${role.dumpDir}/`);
     console.log(`\n对话协议预览 (v2: 5 阶段 18 状态，零下发，零死锁):\n`);
     const planner = new ConversationPlanner({
-      role, maxTurns: 20, allSections,
+      role, maxTurns: 20, allSections, platform,
     });
     console.log("──── 阶段 1: 问身份 ────");
     console.log("── T1: 问名字/做什么/风格 3 词");
@@ -241,10 +249,16 @@ async function main() {
     console.log("\n── T7A: 技能推荐 (2026-06-11 增) ──");
     console.log(planner.planT7ATurn());
     console.log("\n[注] T6 完后如有 recommendedSkills → T7A/B/C 走 T7 装机决策；否则跳过]");
-    console.log("\n── T7C: 比对 + 命令 Agent 用 skill_workshop install 安装 ──");
+    console.log(`\n── T7C: 比对 + 命令 Agent 用 ${platform.installCommand.split(" ")[0]} install 安装 ──`);
     // 模拟 T7B Agent 报"已装：claw-backup" (一个装一个没装)
     planner.t7bInstalled = "claw-backup";
     console.log(planner.planT7CTurn());
+    console.log("\n[注] T7C 完后必须走 T7D 装机校验 (2026-06-12 增)]");
+    console.log("\n── T7D: Agent 自报 ls 输出 + 教头三方对账 ──");
+    // 模拟 T7D 校验：dry-run 只展示 prompt，不跑 handleT7D (避免 dispatch null)
+    console.log(planner._planT7DPrompt());
+    console.log("\n[注] T7D 校验逻辑: 教头解析 Agent ls 输出 ∩ T7B 自报 ∩ recommendedSkills 清单");
+    console.log("[注] 全装 → COMPLETE; 部分装 → 回 T7C 重装; ls 空 → 回 T7C 重装");
     return;
   }
 
@@ -298,8 +312,11 @@ async function main() {
   //   无用消息、浪费 max-turns。
   const skipHealth = args.no_health_check === true || args.no_health_check === "true";
   if (!skipHealth) {
-    const pingTimeout = Math.min(20, timeout);
-    const pingIdle = Math.min(8, idleTimeout);
+    // P0-2 修复 (2026-06-12): pingTimeout 从 20 提到 60, pingIdle 从 8 提到 10
+    //   改 mqtt-adapter.mjs 的 healthCheck 默认值后，trainer 这边也对应放宽上限
+    //   （Math.min 保证训练传的 --timeout 更小时仍用小值，避免放大）
+    const pingTimeout = Math.min(60, timeout);
+    const pingIdle = Math.min(10, idleTimeout);
     process.stdout.write(`  🩺 训练前健康探测 (ping ${pingTimeout}s)... `);
     const health = await healthCheck({
       agent: args.agent,

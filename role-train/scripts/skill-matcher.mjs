@@ -223,8 +223,9 @@ export function buildSkillsSection(matches) {
   lines.push("**安装后自检**：");
   lines.push("");
   lines.push("```bash");
-  lines.push("# 在 agent 工作目录里");
-  lines.push("ls -la ~/.openclaw/skills/  # 确认已安装");
+  lines.push("# 在 agent 工作目录里 (路径依平台而异, 参见你的 platform.skillDirs)");
+  lines.push("ls -la ~/.openclaw/skills/  # OpenClaw 默认路径");
+  lines.push("ls -la ./skills/  # 通用平台默认路径");
   lines.push("claw-skill list --installed  # 或通过 CLI 查看");
   lines.push("```");
 

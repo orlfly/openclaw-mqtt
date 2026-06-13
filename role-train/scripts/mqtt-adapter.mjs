@@ -88,7 +88,17 @@ function _execSendWait(scriptPath, agent, message, timeoutSec, idleTimeoutSec, p
     encoding: "utf-8",
     timeout: processTimeoutMs,
     maxBuffer: 10 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
+    // P0-1 修复 (2026-06-12): 透传 stderr 到教头终端
+    //   之前用 ["ignore", "pipe", "pipe"] 把 send-wait 的诊断日志全吞了
+    //   ("→ Sent to..."、"Reply topic..."、"← Reply #N..."、"Idle timeout...")，
+    //   导致 role-train 出问题时只能盲猜是 Agent 死锁还是协议问题。
+    //   改成 ["ignore", "pipe", "inherit"]：
+    //   - stdin  ignore (子进程不需要输入)
+    //   - stdout pipe (要解析 JSON，必须 pipe 进来)
+    //   - stderr inherit (透传给父进程终端)
+    //   注意顺序：Node.js stdio 三元组是 [stdin, stdout, stderr]，不是 [stdin, stderr, stdout]！
+    //   副作用：教头训练时会看到 send-wait 的详细诊断日志（更易排错）
+    stdio: ["ignore", "pipe", "inherit"],
   });
 }
 
@@ -183,7 +193,7 @@ export class MqttClient {
    * @private
    */
   async _sendAndAwaitRaw(message) {
-    const senderId = process.env.EMQX_SENDER_ID || "openclaw-agent";
+    const senderId = process.env.EMQX_SENDER_ID || "trainer";  // 2026-06-12 改: 默认 'trainer' (跨平台友好)
     const senderName = process.env.EMQX_SENDER_NAME || "教头";
     const senderEmoji = process.env.EMQX_SENDER_EMOJI || "🛠️";
     const senderDesc = process.env.EMQX_SENDER_DESC || "Agent培训师";
@@ -293,17 +303,22 @@ export class MqttClient {
 
 /**
  * 健康探测：训练前 ping 一下 agent，确认在线 + 会回话。
- * 用更短的超时（ping 不该等太久），返回更简单的 ok/ok+reply 形态。
+ *
+ * P0-2 修复 (2026-06-12): 默认 timeout 从 20s 提到 60s
+ *   背景：emqx-mqtt-clients 的 send-wait 默认 timeout = 300s，对冷启动很宽松；
+ *   role-train 的 healthCheck 默认 20s 太短——今天 15:46 那次训练就是 broker/Agent
+ *   刚连上后 Agent 处理延迟 > 20s，导致 healthCheck 误报 "agent may be locked/offline"。
+ *   30 秒后 broker 暖机完成手动 ping 1.x 秒就回了。冷启动友好性修复。
  *
  * @param {object} opts
  * @param {string} opts.agent - 目标 agent clientId
  * @param {string} [opts.pingMsg="ping"] - 探测消息
- * @param {number} [opts.timeout=20] - 单轮超时（秒）
- * @param {number} [opts.idleTimeout=8] - 静默窗口（秒）
+ * @param {number} [opts.timeout=60] - 单轮超时（秒）（P0-2 修复：20 → 60）
+ * @param {number} [opts.idleTimeout=10] - 静默窗口（秒）（P0-2 修复：8 → 10）
  * @param {string} [opts.scriptPath] - 可选：emqx 脚本路径覆盖（测试用）
  * @returns {Promise<{ok: boolean, reply?: string, error?: string}>}
  */
-export async function healthCheck({ agent, pingMsg = "ping", timeout = 20, idleTimeout = 8, scriptPath } = {}) {
+export async function healthCheck({ agent, pingMsg = "ping", timeout = 60, idleTimeout = 10, scriptPath } = {}) {
   if (!agent) throw new Error("healthCheck: 'agent' is required");
   const resolved = resolveEmqxScript(scriptPath);
   try {

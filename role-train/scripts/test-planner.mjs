@@ -27,6 +27,8 @@ function test(name, fn) {
   });
 }
 
+import { BUILTIN_PLATFORMS, resolvePlatform, formatInstallCommand, formatSkillDirHints } from "./platform-config.mjs";
+
 function assert(cond, msg) {
   return cond === true ? true : `${msg || "assertion failed"} (got: ${JSON.stringify(cond)})`;
 }
@@ -521,9 +523,9 @@ await test("v2 _parseT5BResults: 无法解析 → valid=false", async () => {
 
 // ── 状态机转移 ──
 
-await test("v2 TRANSITIONS: 状态数 (5 阶段 + T5D + T6 + T7A/B/C + COMPLETE + ABORT)", async () => {
-  // 5 阶段 + T5D + T6 + T7A/B/C + COMPLETE + ABORT = 26
-  const expectedCount = 26;
+await test("v2 TRANSITIONS: 状态数 (5 阶段 + T5D + T6 + T7A/B/C/D + COMPLETE + ABORT)", async () => {
+  // 5 阶段 + T5D + T6 + T7A/B/C/D + COMPLETE + ABORT = 27
+  const expectedCount = 27;
   return assertEq(Object.keys(STATES).length, expectedCount,
     `应有 ${expectedCount} 个状态，实际 ${Object.keys(STATES).length}`);
 });
@@ -931,37 +933,212 @@ await test("v2 planT7CTurn: 部分已装时列待装", async () => {
     || assertContains(text, "已登记", "应提期望的装后反馈");
 });
 
-await test("v2 T6→T7 端到端: 有推荐 skill 时走 T7A/B/C", async () => {
+await test("v2 _planT7DPrompt: 不指定查询命令 + B1 限定范围 + B2 timeout + B3 区分模式", async () => {
   const role = makeV2Role();
-  role.recommendedSkills = [
-    { id: "playwright", name: "Playwright", family: "browser", path: "x/y" },
-    { id: "claw-backup", name: "Claw Backup", family: "infra", path: "a/b" },
-  ];
-  const mock = makeMockSend([
-    "我叫麦芒，AI 助手+招聘专家。风格：干脆靠谱有主见",
-    "边界：1)不帮歧视 2)不泄隐私。沉默：碰红线拒。风格：师傅气",
-    "1.需求澄清 2.画像 3.渠道 4.筛选 5.面试 6.Offer 7.入职",
-    "ATS Moka LinkedIn 脉脉 飞书",
-    "举例第 4 步：某公司 200 简历筛 15 人",
-    "写完 IDENTITY.md 808B",
-    "pong",
-    "写完 SOUL.md 1511B",
-    "pong",
-    "写完 AGENTS.md 3374B",
-    "pong",
-    "我是麦芒",
-    "1,1,1,1,1,1,1,1,1,1",    // T5B 10 个 1 0 漏点
-    "已标记基础设定",          // T6
-    "已装：playwright, claw-backup",  // T7A 末尾 Agent 回已装 (作为 T7B 解析输入)
-    // T7B 不发 prompt — 直接读 T7A 回复
-    "A",                       // T7C 选 A 全部装 (但推荐都已装, 会跳装机回 "已装全部")
-  ]);
-  const planner = new ConversationPlanner({ role, maxTurns: 22 });
-  const result = await planner.run(mock.sendFn);
-  if (!result.success) {
-    console.log(`     [DEBUG T7] state=${result.state} reason=${result.finalReason}`);
-  }
-  return assertEq(result.success, true, `应成功，实际: ${result.state}, ${result.finalReason}`);
+  role.recommendedSkills = [{ id: "x", name: "X" }];
+  const p = new ConversationPlanner({ role });
+  const text = p._planT7DPrompt();
+  // 2026-06-12 改: 不指定命令, B1/B2/B3 三重门
+  return assertContains(text, "你跑的命令", "应提示贴命令+输出")
+    || assertContains(text, "贴回", "应提示贴回")
+    || assertContains(text, "限定范围", "B1: 应限定查询范围 (防全盘扫)")
+    || assertContains(text, "timeout", "B2: 应建议加 timeout (防 hang)")
+    || assertContains(text, "【查询】", "B3: 应让 Agent 区分查询模式")
+    || assertContains(text, "【凭记忆报】", "B3: 应让 Agent 区分凭记忆模式")
+    || assertNotContains(text, "请跑：", "不应给明确查询命令");
+});
+
+function assertNotContains(haystack, needle, label) {
+  if (!haystack.includes(needle)) return null;
+  throw new Error(`${label || "断言"}失败: 不应包含 "${needle}", 实际包含`);
+}
+
+await test("v2 _parseT7DInstalled: 抽 ls 输出里的 skill id (过滤噪声)", async () => {
+  const p = new ConversationPlanner({ role: makeV2Role() });
+  const reply = `total 12
+drwx---  5 user user 4096 Jun 12 12:00 .
+drwx---  8 user user 4096 Jun 12 11:00 ..
+-rw-r--r--  1 user user  100 Jun 12 10:00 SKILL.md
+NO_CLAW_SKILL_CLI
+playwright
+claw-backup
+n8n
+md-converter
+`;
+  const tokens = p._parseT7DInstalled(reply);
+  return assertEq(tokens.length, 4, `应抽 4 个 skill, 实际 ${tokens.length}: ${tokens.join(",")}`)
+    || assertEq(tokens.includes("playwright"), true, "应含 playwright")
+    || assertEq(tokens.includes("claw-backup"), true, "应含 claw-backup")
+    || assertEq(tokens.includes("n8n"), true, "应含 n8n")
+    || assertEq(tokens.includes("md-converter"), true, "应含 md-converter")
+    || assertEq(tokens.includes("NO_CLAW_SKILL_CLI"), false, "应过滤噪声");
+});
+
+await test("v2 _verifyT7D: 全装 → ok=true, missing=[]", async () => {
+  const p = new ConversationPlanner({ role: makeV2Role() });
+  const r = p._verifyT7D(
+    "playwright\nclaw-backup\nn8n",
+    "playwright, claw-backup",
+    [{ id: "playwright" }, { id: "claw-backup" }, { id: "n8n" }],
+  );
+  return assertEq(r.ok, true, "应 ok")
+    || assertEq(r.missing.length, 0, "应无 missing")
+    || assertEq(r.empty, false, "应非空");
+});
+
+await test("v2 _verifyT7D: 部分装 → ok=false, missing 列出未装的", async () => {
+  const p = new ConversationPlanner({ role: makeV2Role() });
+  const r = p._verifyT7D(
+    "playwright\nclaw-backup",  // 缺 n8n
+    "playwright",
+    [{ id: "playwright" }, { id: "claw-backup" }, { id: "n8n" }],
+  );
+  return assertEq(r.ok, false, "应不 ok")
+    || assertEq(r.partial, true, "应部分")
+    || assertEq(r.missing.length, 1, `应缺 1 个, 实际 ${r.missing.length}`)
+    || assertEq(r.missing[0], "n8n", "应缺 n8n");
+});
+
+await test("v2 _verifyT7D: ls 空 + T7B 空 → empty=true", async () => {
+  const p = new ConversationPlanner({ role: makeV2Role() });
+  const r = p._verifyT7D(
+    "NO_CLAW_SKILL_CLI\n",
+    "(空)",
+    [{ id: "a" }, { id: "b" }],
+  );
+  return assertEq(r.empty, true, "应空")
+    || assertEq(r.ok, false, "应不 ok")
+    || assertEq(r.missing.length, 2, `应缺 2 个, 实际 ${r.missing.length}`);
+});
+
+await test("v2 _verifyT7D: 无推荐 skill 时 ok=true (默认走), missing=[]", async () => {
+  const p = new ConversationPlanner({ role: makeV2Role() });
+  const r = p._verifyT7D("anything", "anything", []);
+  return assertEq(r.ok, true, "无推荐时 ok=true (跳过 T7D)")
+    || assertEq(r.missing.length, 0, "无 missing");
+});
+
+// ── B3: 凭记忆报检测 ──
+
+await test("v2 B3 _verifyT7D: 【凭记忆报】即使 skill 全对也强制 unverified=true, ok=false", async () => {
+  const p = new ConversationPlanner({ role: makeV2Role() });
+  const r = p._verifyT7D(
+    "【凭记忆报】已装 a, b, c",  // skill 都对, 但显式说凭记忆
+    "a, b, c",
+    [{ id: "a" }, { id: "b" }, { id: "c" }],
+  );
+  return assertEq(r.unverified, true, "B3: 应检测为 unverified")
+    || assertEq(r.ok, false, "B3: 凭记忆报即使全对也不能 ok")
+    || assertEq(r.t7dReported.length, 0, "B3: unverified 时不抽 token");
+});
+
+await test("v2 B3 _verifyT7D: '未查询' 关键词也被检测为 unverified", async () => {
+  const p = new ConversationPlanner({ role: makeV2Role() });
+  // 文本含 '未查询' (教头检测的关键字)
+  const r = p._verifyT7D("我未查询，凭记忆报：a, b", "a, b", [{ id: "a" }, { id: "b" }]);
+  return assertEq(r.unverified, true, "应检测 '未查询' 为 unverified")
+    || assertEq(r.ok, false, "应不 ok");
+});
+
+await test("v2 B3 _verifyT7D: 英文 'I didn't run' 也被检测", async () => {
+  const p = new ConversationPlanner({ role: makeV2Role() });
+  const r = p._verifyT7D("I didn't run any command, but a and b are installed", "a, b", [{ id: "a" }, { id: "b" }]);
+  return assertEq(r.unverified, true, "应检测英文 'didn\\'t run' 为 unverified")
+    || assertEq(r.ok, false, "应不 ok");
+});
+
+await test("v2 B3 _verifyT7D: 【查询】正常报告, 即使 token 跟推荐对得上仍走 ok 路径", async () => {
+  const p = new ConversationPlanner({ role: makeV2Role() });
+  const r = p._verifyT7D(
+    "【查询】我跑了 ls ~/.openclaw/skills/\nplaywright\nclaw-backup\nn8n",
+    "playwright, claw-backup",
+    [{ id: "playwright" }, { id: "claw-backup" }, { id: "n8n" }],
+  );
+  return assertEq(r.unverified, false, "B3: 标了【查询】不是 unverified")
+    || assertEq(r.ok, true, "应 ok");
+});
+
+// ── Platform 抽象 (2026-06-12 增) ──
+
+await test("platform: BUILTIN_PLATFORMS 含 openclaw + generic", async () => {
+  return assertEq(typeof BUILTIN_PLATFORMS.openclaw, "object", "应有 openclaw")
+    || assertEq(typeof BUILTIN_PLATFORMS.generic, "object", "应有 generic")
+    || assert(Array.isArray(BUILTIN_PLATFORMS.openclaw.skillDirs), "openclaw.skillDirs 应是数组")
+    || assert(Array.isArray(BUILTIN_PLATFORMS.generic.skillDirs), "generic.skillDirs 应是数组");
+});
+
+await test("platform: resolvePlatform 默认 openclaw", async () => {
+  const p = resolvePlatform({});
+  return assertEq(p.id, "openclaw", "默认 openclaw")
+    || assert(p.skillDirs.some(d => d.includes(".openclaw")), "默认 skillDirs 应含 .openclaw");
+});
+
+await test("platform: resolvePlatform 优先 CLI 参数", async () => {
+  const p = resolvePlatform({ cliPlatform: "generic" });
+  return assertEq(p.id, "generic", "CLI 优先")
+    || assert(p.skillDirs.some(d => d.includes("./")), "generic skillDirs 应含 ./");
+});
+
+await test("platform: resolvePlatform roleMeta 字段覆盖 builtin (id 未传时)", async () => {
+  // cliPlatform 未传 → roleMeta.id 作 id
+  // roleMeta.skillDirs 覆盖 builtin 的
+  const p = resolvePlatform({
+    roleMeta: { id: "generic", skillDirs: ["/custom/path"] },
+  });
+  return assertEq(p.id, "generic", "roleMeta.id 作为 id")
+    || assert(p.skillDirs.includes("/custom/path"), "roleMeta.skillDirs 覆盖 builtin");
+});
+
+await test("platform: resolvePlatform CLI 优先于 roleMeta (id 已被 CLI 锁)", async () => {
+  // CLI 传了 id, roleMeta 也传了 → CLI 赢
+  const p = resolvePlatform({
+    cliPlatform: "openclaw",
+    roleMeta: { id: "generic", skillDirs: ["/custom/path"] },
+  });
+  return assertEq(p.id, "openclaw", "CLI 优先于 roleMeta.id")
+    || assert(p.skillDirs.includes("/custom/path"), "但 roleMeta.skillDirs 字段仍可覆盖 builtin")
+    || assert(!p.skillDirs.some(d => d.includes("~/.openclaw/")), "skillDirs 被 roleMeta 覆盖了");
+});
+
+await test("platform: resolvePlatform 未知 id 报清晰错误", async () => {
+  let err = null;
+  try { resolvePlatform({ cliPlatform: "nonsense" }); } catch (e) { err = e; }
+  return assert(err instanceof Error, "应抛错")
+    || assertContains(err.message, "nonsense", "应含未知 id")
+    || assertContains(err.message, "openclaw", "应列出已知平台");
+});
+
+await test("platform: formatInstallCommand 替换 {id} 占位符", async () => {
+  const p = BUILTIN_PLATFORMS.generic;
+  return assertEq(formatInstallCommand(p, "foo"), "install-skill foo", "应替换 {id}")
+    || assertEq(formatInstallCommand(p, ""), "install-skill ", "空 id 也应替换");
+});
+
+await test("platform: formatSkillDirHints 生成 '`'a`' 或 '`'b`''", async () => {
+  const p = BUILTIN_PLATFORMS.openclaw;
+  const hint = formatSkillDirHints(p);
+  return assertContains(hint, "~/.openclaw/skills/", "应含第一个目录")
+    || assertContains(hint, "~/.openclaw/workspace/skills/", "应含第二个目录")
+    || assertContains(hint, " 或 ", "应用 ' 或 ' 连接");
+});
+
+await test("platform: ConversationPlanner 接收 platform 后, planT7A 路径随平台变", async () => {
+  const role = makeV2Role();
+  role.recommendedSkills = [{ id: "x", name: "X" }];
+  const pGeneric = new ConversationPlanner({ role, platform: BUILTIN_PLATFORMS.generic });
+  const text = pGeneric.planT7ATurn();
+  return assertContains(text, "./skills/", "generic platform 提示里应有 ./skills/")
+    || assertNotContains(text, "~/.openclaw/", "generic platform 不应出现 .openclaw 路径");
+});
+
+await test("platform: ConversationPlanner planT7C 命令随平台变", async () => {
+  const role = makeV2Role();
+  role.recommendedSkills = [{ id: "x", name: "X" }];
+  const p = new ConversationPlanner({ role, platform: BUILTIN_PLATFORMS.generic });
+  p.t7bInstalled = "";  // 让 missing 包含 x
+  const text = p.planT7CTurn();
+  return assertContains(text, "install-skill x", "generic 平台应是 install-skill")
+    || assertNotContains(text, "skill_workshop", "generic 平台不应出现 skill_workshop");
 });
 
 // ── 端到端 happy path (mock) ──
@@ -1002,6 +1179,22 @@ await test("v2 happy path 18 轮 → COMPLETE", async () => {
     "我是麦芒第二轮：7步工作流和边界已完整背下来",
     "1,1,1,1,1,1,1,1,1,1",  // 第二轮 T5B 全记住 → 0 漏点 → 走 T6
     "基础设定完成",        // T6 新增
+    // T7A/B/C/D (2026-06-12 增 T7D)
+    "已装：playwright, claw-backup, n8n",  // T7A 末尾 Agent 报已装
+    "skill_workshop install md-converter, qmd, openviking, baoyu-md-html, merge-drafts, duckse, cctv-news",  // T7C 决策
+    // T7D 验证: Agent 跑 ls 贴回完整输出 (含所有 10 个 skill)
+    [
+      "claw-backup",
+      "playwright",
+      "n8n",
+      "md-converter",
+      "qmd",
+      "openviking",
+      "baoyu-md-html",
+      "merge-drafts",
+      "duckse",
+      "cctv-news",
+    ].join("\n"),
   ]);
   const planner = new ConversationPlanner({
     role: makeV2Role(),
@@ -1021,7 +1214,7 @@ await test("v2 happy path 18 轮 → COMPLETE", async () => {
   }
   return assertEq(result.success, true, `应成功，实际: ${result.state}, ${result.finalReason}`)
     || assertEq(result.state, STATES.COMPLETE, "state")
-    || assertEq(result.turns, 14, `turns 应为 14，实际 ${result.turns}`);
+    || assertEq(result.turns, 17, `turns 应为 17 (含 T7D 1 轮)，实际 ${result.turns}`);
 });
 
 await test("v2 T5B 解析失败时 3 次后放弃 → 仍走 T5C", async () => {

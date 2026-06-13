@@ -1,6 +1,8 @@
 /**
  * conversation-planner.mjs — 对话引导式角色训练规划器 (v2)
  *
+ * 2026-06-12 增: 接入 platform-config.mjs, T7A/T7C/T7D 不再硬编码 openclaw 路径/CLI
+ *
  * 2026-06-11 重大改造：
  *   - 从"下发式"改为"对话引导式"——T1-T3 只发问题，不发文件原文
  *   - T3 拆 3 小轮（T3A 步骤 / T3B 工具 / T3C 例子），避免单任务过载死锁
@@ -22,6 +24,7 @@
  */
 
 import { classifyFeedback } from "./feedback-analyzer.mjs";
+import { BUILTIN_PLATFORMS, formatInstallCommand, formatSkillDirHints } from "./platform-config.mjs";
 
 const STATES = {
   // ── 阶段 1: 问身份 (T1) ──
@@ -58,6 +61,7 @@ const STATES = {
   T7A_RECOMMEND:    "T7A_RECOMMEND",     // 教头发推荐 skill 清单
   T7B_INSTALLED:    "T7B_INSTALLED",     // Agent 报已装清单
   T7C_DECISION:     "T7C_DECISION",      // 教头比对 + Agent 决策要不要装
+  T7D_VERIFY:       "T7D_VERIFY",        // 2026-06-12 增: Agent 自报 ls 输出 + 教头三方对账
 
   COMPLETE:      "COMPLETE",
   ABORT:         "ABORT",
@@ -93,7 +97,10 @@ const TRANSITIONS = {
   // 2026-06-11 增：T6 完后可走 T7 推荐技能（默认走）；直接走 COMPLETE 是省略
   T7A_RECOMMEND:     ["T7B_INSTALLED", "T7A_RECOMMEND", "ABORT"],
   T7B_INSTALLED:     ["T7C_DECISION", "T7B_INSTALLED", "ABORT"],
-  T7C_DECISION:      ["COMPLETE", "T7C_DECISION", "ABORT"],
+  T7C_DECISION:      ["T7D_VERIFY", "T7C_DECISION", "ABORT"],
+  // 2026-06-12 改: T7C → T7D_VERIFY (装机后自报校验)；不再直走 COMPLETE
+  T7D_VERIFY:        ["COMPLETE", "T7C_DECISION", "ABORT"],
+  // 2026-06-12 增: T7D 完 → 校验通过走 COMPLETE；不通过回 T7C 重装
   COMPLETE:          [],
   ABORT:             [],
 };
@@ -108,6 +115,7 @@ export class ConversationPlanner {
    * @param {Function} [opts.onAgentFeedback] - Agent 回复预览回调
    * @param {string} [opts.agentWorkdir] - Agent 工作目录（用于 T5C diff 提示）
    * @param {Object} [opts.hardChecks] - T5B 硬指标清单（可选：调用方预生成；不传则 planner 自动抽 8 条）
+   * @param {Object} [opts.platform] - 平台配置 (2026-06-12 增: 路径/CLI 解耦)
    */
   constructor({
     role,
@@ -117,6 +125,7 @@ export class ConversationPlanner {
     onAgentFeedback,
     agentWorkdir,
     hardChecks,
+    platform,
   }) {
     this.role = role;
     this.roleName = role.roleName;
@@ -126,6 +135,8 @@ export class ConversationPlanner {
     this.onStateChange = onStateChange || (() => {});
     this.onAgentFeedback = onAgentFeedback || (() => {});
     this.agentWorkdir = agentWorkdir;
+    // 2026-06-12 增: platform 配置 (默认为 openclaw)
+    this.platform = platform || BUILTIN_PLATFORMS.openclaw;
 
     // 角色内容（保留字段：用于 T5B 硬指标抽取和 T5C diff 提示）
     this.identity = role.files?.["IDENTITY.md"] || "";
@@ -210,6 +221,7 @@ export class ConversationPlanner {
       case STATES.T7A_RECOMMEND:    return this.handleAsk(sendFn, "T7A", this.planT7ATurn.bind(this));
       case STATES.T7B_INSTALLED:    return this.handleT7B(sendFn);
       case STATES.T7C_DECISION:     return this.handleAsk(sendFn, "T7C", this.planT7CTurn.bind(this));
+      case STATES.T7D_VERIFY:       return this.handleT7D(sendFn);
 
       default: throw new Error(`invalid state: ${this.state}`);
     }
@@ -372,38 +384,53 @@ export class ConversationPlanner {
       return `没推荐 skill，跳过 T7。`;
     }
     const list = skills.map((s, i) => `${i + 1}. **${s.name || s.id}** (${s.family || "?"}, ${s.installs || "?"} installs)`).join("\n");
+    // 2026-06-12 改: 从 platform.skillDirs 读路径, 不再硬编码 ~/.openclaw/
+    const dirHint = formatSkillDirHints(this.platform);
     return [
       `现在进行技能推荐。基于你角色${this.roleName}，匹配到 ${skills.length} 个适合你的 skill：`,
       ``,
       list,
       ``,
-      `请用 \`ls ~/.openclaw/skills/\` 看你工作区已装哪些 skill，回我：`,
+      `请用 \`ls ${dirHint}\` 看你工作区已装哪些 skill，回我：`,
       `- 已装清单（逗号分隔）`,
       `- 路径不对或其他情况也请说明`,
     ].join("\n");
   }
 
-  /** T7C: 教头比对 推荐 vs 已装 → 列待装 → 要求 Agent 装机 (2026-06-11 改) */
+  /** T7C: 教头比对 推荐 vs 已装 → 列待装 → 要求 Agent 装机 (2026-06-11 改)
+   *  2026-06-12 改: installCommand + ackFormat 从 platform 读, 不再硬编码 skill_workshop
+   *  2026-06-12 改: 用 clawhubSlug (ClawHub 装机 slug) 而非 shortlist id
+   *                 shortlist id 通常是 GitHub user/repo 格式, 不是 ClawHub 装机命令用的 slug
+   */
   planT7CTurn() {
     const skills = this.role.recommendedSkills || [];
     const installed = (this.t7bInstalled || "").split(/[,，\s]+/).filter(Boolean);
-    const missing = skills.filter(s => !installed.includes(s.name) && !installed.includes(s.id));
+    // 2026-06-12 改: 去重用 clawhubSlug / id / name 三者都试, 因为 Agent 报的可能不统一
+    const missing = skills.filter(s => {
+      const id = s.clawhubSlug || s.id;
+      return !installed.includes(id) && !installed.includes(s.name);
+    });
     if (missing.length === 0) {
       return `你已装全部推荐 skill，跳过装机。`;
     }
     const list = missing.map((s, i) => {
-      const cmd = `skill_workshop install ${s.id}`;
-      return `${i + 1}. \`${cmd}\`  (${s.name || s.id}, ${s.family || "?"}, ${s.installs || "?"} installs, path: ${s.path || "?"})`;
+      // 优先用 clawhubSlug, 没有再 fallback 到 id
+      const installId = s.clawhubSlug || s.id;
+      const cmd = formatInstallCommand(this.platform, installId);
+      const slugNote = s.clawhubSlug && s.clawhubSlug !== s.id
+        ? `  (shortlist id: ${s.id}, ClawHub slug: ${s.clawhubSlug})`
+        : '';
+      return `${i + 1}. \`${cmd}\`  (${s.name || s.id}, ${s.family || "?"}, ${s.installs || "?"} installs)${slugNote}`;
     }).join("\n");
     return [
-      `推荐 vs 已装对比：你差 ${missing.length} 个 skill，需走 skill_workshop 登记：`,
+      `推荐 vs 已装对比：你差 ${missing.length} 个 skill，需走 ClawHub 装机：`,
       ``,
       list,
       ``,
-      `请依次运行上面 ${missing.length} 条 \`skill_workshop install\` 命令。`,
-      `每装一个等系统回 \`已登记: <id>\`，全部装完后报\`全部已装 + 登记完\`。`,
+      `请依次运行上面 ${missing.length} 条 \`${this.platform.installCommand.split(" ")[0]}\` 命令。`,
+      `每装一个等系统回 \`${this.platform.installAckFormat}\`，全部装完后报\`全部已装 + 登记完\`。`,
       ``,
-      `如某条 install 报错（如网络/权限），请报出错误，不要跳过。`,
+      `如某条 install 报错（如网络/权限/该 slug 不存在），请报出错误，不要跳过。`,
     ].join("\n");
   }
 
@@ -552,7 +579,12 @@ export class ConversationPlanner {
       // 2026-06-11 增: T6 完后默认走 T7 推荐技能 (有推荐的话)；无推荐才走 COMPLETE
       const hasSkills = (this.role.recommendedSkills || []).length > 0;
       next = hasSkills ? STATES.T7A_RECOMMEND : STATES.COMPLETE;
-    } else if (label === "T7C") next = STATES.COMPLETE;  // T7C 完后走 COMPLETE
+    } else if (label === "T7C") next = STATES.T7D_VERIFY;  // 2026-06-12 改: 装机后必须走 T7D 校验
+    else if (label === "T7D") {
+      // 2026-06-12 增: T7D 校验结果已在 handleT7D 内部 transition 完，这里只是占位
+      // (handleT7D 会根据对账结果自己决定走 COMPLETE 还是回 T7C)
+      next = STATES.T7D_VERIFY;  // 占位；正常不会走到这里
+    }
     else if (label === "T7A") next = STATES.T7B_INSTALLED;  // T7A 完后走 T7B 解析
     else next = `${label}_ACK`;
     this.transition(next, { reason: `${label} sent; awaiting ${next}` });
@@ -677,6 +709,95 @@ export class ConversationPlanner {
     }
   }
 
+  /** T7D: Agent 自报 ls 输出 + 教头三方对账 (2026-06-12 增)
+   *  三方 = T7B 自报 ∩ T7D ls 输出 ∩ recommendedSkills 清单
+   *  - 全装: transition(COMPLETE)
+   *  - 部分装/装失败: transition(T7C_DECISION) 让 Agent 重装
+   */
+
+  /** T7D 提示文本 (2026-06-12 增, 拆出来便于 dry-run 预览)
+   *  B1: 限定查询范围, 避免全盘扫
+   *  B2: 建议加 timeout, 避免 find hang
+   *  B3: 让 Agent 区分"查询" vs "凭记忆报"两种模式
+   *  2026-06-12 改: skill 目录从 platform.skillDirs 读
+   */
+  _planT7DPrompt() {
+    const dirHint = formatSkillDirHints(this.platform);
+    const homePrefix = (this.platform.skillDirs[0] || "").split("/").slice(0, 2).join("/");  // e.g. "~/.openclaw"
+    return [
+      `现在做装机验证。`,
+      ``,
+      `请你自己想办法查一下你工作区里现在装了什么 skill。你可以：`,
+      `- 用 \`ls\` / \`find\` / \`claw-skill list\` 等你觉得合适的命令`,
+      `- 查 ${dirHint} 目录`,
+      `- 查 registry / 索引文件、查安装日志 — 任何你能想到的途径`,
+      ``,
+      `3 个边界提醒：`,
+      `1. **限定范围** — 只查 \`${homePrefix}/\` 下的 skills 目录，别 \`find /\` 全盘扫（输出会爆）`,
+      `2. **加 timeout** — 查命令建议套 \`timeout 10 <cmd>\`，避免 hang 住`,
+      `3. **区分查询 vs 自报** — 两种回法都行，但要在第一行说清楚：`,
+      `   - 查询了：开头写"【查询】" + 跑的命令 + 完整输出`,
+      `   - 凭记忆：开头写"【凭记忆报】" + 已装清单（这样会判无效、需重装）`,
+      ``,
+      `默认期望【查询】模式。【凭记忆报】会被判不通过。`,
+      ``,
+      `把**你跑的命令 + 完整输出**贴回（多行原样贴，不要总结）。`,
+    ].join("\n");
+  }
+
+  async handleT7D(sendFn) {
+    this.turn++;
+    this.log(`\n── 第 ${this.turn} 轮 [T7D_VERIFY] Agent 自报校验 ──`);
+
+    // 1. 发 T7D 短 prompt (避免死锁: 多行代码块，但教头侧总字节数 ≤ 350)
+    const text = this._planT7DPrompt();
+    const result = await this.dispatch(sendFn, text);
+
+    if (!result.ok) {
+      this.recordTurn("trainer", text, "", result.error);
+      this.transition(STATES.ABORT, { reason: `T7D send failed: ${result.error}` });
+      return;
+    }
+    this.recordTurn("trainer", text, result.reply, null);
+
+    // 2. 解析 Agent 回的 ls 输出 (复用 _parseT7DInstalled)
+    const reply = result.reply || "";
+    const t7dReported = this._parseT7DInstalled(reply);
+
+    // 3. 三方对账 (复用 _verifyT7D)
+    const recommended = (this.role.recommendedSkills || []).map(s => s.id || s.name).filter(Boolean);
+    // 2026-06-12 修: handleT7D 之前直接读 verify.xxx 会抛 "verify is not defined"
+    // 应通过 _verifyT7D() 拿对账结果
+    const verifyResult = this._verifyT7D(reply, this.t7bInstalled, recommended);
+    const t7bReported = verifyResult.t7bReported;
+    const missing = verifyResult.missing;
+    const consensus = verifyResult.consensus;
+    const verify = verifyResult;  // 兼容下面 if 分支的字段引用
+
+    this.log(`   推荐 (${recommended.length}): ${recommended.join(", ")}`);
+    this.log(`   T7B 自报: ${t7bReported.join(", ") || "(空)"}`);
+    this.log(`   T7D ls: ${t7dReported.join(", ") || "(空)"}`);
+    this.log(`   一致: ${consensus.length} / 缺: ${missing.length}`);
+
+    if (verify.unverified) {
+      // B3: Agent 说"凭记忆报", 强制回 T7C 要求实际查询
+      this.log(`   ❌ T7D 校验失败: Agent 凭记忆报, 需实际查询`);
+      this.transition(STATES.T7C_DECISION, { reason: `T7D verify unverified: agent skipped query` });
+    } else if (verify.ok) {
+      // ✅ 全装
+      this.log(`   ✅ T7D 校验通过: 全部 ${recommended.length} 个 skill 已装机`);
+      this.transition(STATES.COMPLETE, { reason: `T7D verify ok: ${recommended.length} skills installed` });
+    } else if (verify.empty) {
+      // ❌ ls 输出空 + T7B 也空 → 装机完全失败
+      this.log(`   ❌ T7D 校验失败: ls 输出空，疑似 install 没真成功`);
+      this.transition(STATES.T7C_DECISION, { reason: `T7D verify fail: empty ls, retry install` });
+    } else {
+      // ⚠️ 部分装
+      this.log(`   ⚠️ T7D 校验部分通过: 还差 ${missing.length} 个: ${missing.join(", ")}`);
+      this.transition(STATES.T7C_DECISION, { reason: `T7D verify partial: missing ${missing.length} (${missing.join(",")})` });
+    }
+  }
+
   /** T7B: 解析 Agent 已装 skill 清单 */
   async handleT7B(sendFn) {
     this.turn++;
@@ -687,6 +808,53 @@ export class ConversationPlanner {
     this.t7bInstalled = lastReply;
     this.log(`   已装 (raw): ${lastReply.slice(0, 80)}`);
     this.transition(STATES.T7C_DECISION, { reason: "T7B 解析已装清单" });
+  }
+
+  /** T7D 独立解析函数 (2026-06-12 增, 抽出来便于单测) */
+  _parseT7DInstalled(reply) {
+    // 噪声黑名单 (常见 ls 噪声: 文件权限、日期、用户名、shell echo)
+    const noise = /^(NO_CLAW_SKILL_CLI|total|\.|\.\.|\s*|drwx.*|---.*|\d+:\d+|user|bin|root|\d{1,2}:\d{2}|Jun|Jan|Feb|Mar|Apr|May|Jul|Aug|Sep|Oct|Nov|Dec)$/i;
+    return (reply || "")
+      .split(/[\s,;|\n\r]+/)
+      .map(t => t.replace(/[`'"]/g, ""))
+      .filter(t => /^[a-zA-Z][a-zA-Z0-9_-]{2,}$/.test(t) && !noise.test(t));
+  }
+
+  /** T7D 对账函数 (2026-06-12 增, 抽出来便于单测)
+   *  B3 增强: 检测 Agent 是否"凭记忆报"——检测到则 unverified=true, 强制 ok=false
+   */
+  _verifyT7D(t7dReply, t7bInstalled, recommendedSkills) {
+    const recommended = (recommendedSkills || []).map(s => s.id || s.name).filter(Boolean);
+    // t7bInstalled 是 Agent 自然语言回答 (中文+混 标点)，只过滤"伪空"标记
+    const t7bPseudoEmpty = /^[\s(（【\[【]*[空空\s]*[)）】\]】]*$/;
+    const t7bRaw = (t7bInstalled || "").trim();
+    const t7bReported = t7bPseudoEmpty.test(t7bRaw) ? [] :
+      t7bRaw.split(/[,，;；\s\n]+/).map(s => s.trim()).filter(Boolean);
+    // B3: 检测"凭记忆报"模式 (Agent 跳过查询只报记忆)
+    const unverifiedPatterns = [
+      /【凭记忆报】/,
+      /凭记忆报/,
+      /未查询/,
+      /没跑命令/,
+      /跳过查询/,
+      /I\s*didn'?t\s*(run|check|query)/i,
+      /I\s*unverified/i,
+    ];
+    const unverified = unverifiedPatterns.some(p => p.test(t7dReply || ""));
+    const t7dReported = unverified ? [] : this._parseT7DInstalled(t7dReply);
+    const missing = recommended.filter(r => !t7dReported.includes(r));
+    const consensus = recommended.filter(r => t7dReported.includes(r) || t7bReported.includes(r));
+    return {
+      // 无推荐时默认 ok=true (跳过 T7D); 有推荐且全装 + 非 unverified 才 ok
+      ok: recommended.length === 0 || (missing.length === 0 && !unverified),
+      partial: missing.length > 0 && !unverified,
+      empty: t7dReported.length === 0 && t7bReported.length === 0,
+      unverified,   // B3: Agent 显式说"凭记忆报" → 强制失败
+      missing,
+      consensus,
+      t7dReported,
+      t7bReported,
+    };
   }
 
   // ── T5 循环退出判定 (2026-06-11 增) ──

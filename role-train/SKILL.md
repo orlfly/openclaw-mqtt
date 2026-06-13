@@ -175,8 +175,67 @@ INTRO → SOUL_ACK ─┬─→ AGENTS_FEED (灵魂复述 OK)
 | **`emqx-mqtt-clients` skill** | ✅ 必需 | role-train **不直接连 MQTT**，每轮发送都委派给它 |
 | `mqtt` npm 包 | 间接 | emqx-mqtt-clients 内部使用 |
 | `.env` 配置 | ✅ 必需 | `EMQX_HOST` / `EMQX_MQTT_PORT` / `EMQX_API_KEY` / `EMQX_API_SECRET` / `EMQX_SENDER_*`（与 emqx-mqtt-clients 共用） |
+| **目标 Agent 平台** | ✅ 必需 | role-train 通过 `--platform <id>` 选平台（默认 `openclaw`）；详见下文 |
 
 > ⚠️ **前置条件**：必须先安装并配置 `emqx-mqtt-clients` skill。
+
+## 目标 Agent 平台 (2026-06-12 解耦)
+
+role-train 通过 **platform 抽象** 与具体 Agent 平台解耦，不再硬编码 openclaw 特定路径/CLI。
+
+### 内置平台
+
+| platform id | 适用 | skill 目录 | install 命令 |
+|---|---|---|---|
+| `openclaw` (默认) | OpenClaw 系 Agent | `~/.openclaw/skills/` 等 | `skill_workshop install {id}` |
+| `generic` | 其他系 Agent | `./skills/` 等 | `install-skill {id}` |
+
+### 3 层覆盖优先级
+
+```
+CLI --platform  >  role.roleMeta.platform  >  env ROLE_TRAIN_PLATFORM  >  默认 'openclaw'
+```
+
+### CLI 用法
+
+```bash
+# 默认 (openclaw)
+node skills/role-train/scripts/train-role.mjs --role-file ... --agent ...
+
+# 显式 generic 平台
+node skills/role-train/scripts/train-role.mjs --platform generic --role-file ... --agent ...
+```
+
+### 角色文件元数据覆盖 (细粒度)
+
+在 role 文件的 YAML frontmatter 里加 `platform` 段，可对单角色覆盖默认平台：
+
+```yaml
+---
+name: MyRole
+platform:
+  id: openclaw       # 用 builtin
+  installCommand: "my-skill install {id}"   # 只覆盖这一个字段
+---
+```
+
+### 添加新平台
+
+在 `scripts/platform-config.mjs` 的 `BUILTIN_PLATFORMS` 加一条：
+
+```js
+myplatform: {
+  id: "myplatform",
+  skillDirs: ["/path/to/skills"],
+  installCommand: "my-install {id}",
+  installAckPattern: /^installed:\s*(\S+)/i,
+  installAckFormat: "installed: <id>",
+  defaultSenderId: "trainer",
+  fileLayout: "openclaw-triple",  // 或自定义
+},
+```
+
+> ⚠️ **文件结构前置条件**：role-train **T4-T6 阶段假设 Agent 使用 OpenClaw 标准的 IDENTITY.md / SOUL.md / AGENTS.md 三文件结构**。这不是 platform 抽象的一部分（属于 role-train 的核心设计），若 Agent 使用别的文件结构（如 LangChain 记忆系统），需重写 T4-T6。
 
 ## 安装设置
 
